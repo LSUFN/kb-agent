@@ -33,6 +33,25 @@ spring:
     multipart:
       max-file-size: 20MB
       max-request-size: 21MB
+  ai:
+    model:
+      # 只使用 Chat（M3 起）和 Embedding（M2 起），其余模型不创建
+      image: none
+      moderation: none
+      audio:
+        speech: none
+        transcription: none
+    openai:
+      # Spring AI 2.0 底层是 OpenAI 官方 SDK：base-url 必须以 /v1 结尾（§2.2 S2）
+      base-url: ${AI_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      api-key: ${AI_API_KEY:}
+      chat:
+        options:
+          model: ${AI_CHAT_MODEL:qwen-plus}
+      embedding:
+        options:
+          model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
+          dimensions: ${AI_EMBEDDING_DIMENSIONS:1024}
 
 server:
   shutdown: graceful
@@ -69,3 +88,24 @@ app:
     # 启动时创建 admin / analyst / user 三个演示账号；只在账号不存在时创建，不覆盖已有密码
     seed-users: false
     password: ${DEMO_USER_PASSWORD:}
+  storage:
+    root: ${APP_STORAGE_ROOT:./data/storage}
+    # 对账只清理早于宽限期的文件，避免误删正在上传的文件（§4.1）
+    orphan-grace-period: 1h
+    reconcile-interval: 1h
+  task:
+    scan-interval: 5s
+    lease-duration: 5m
+    worker-concurrency: 2
+    retry-base-delay: 30s
+    retry-max-delay: 10m
+  ingestion:
+    chunk-size: 500
+    chunk-overlap: 80
+    max-chunks: 3000
+  embedding:
+    # 必须与 doc_chunk.embedding 的列维度一致，启动时校验
+    dimensions: ${AI_EMBEDDING_DIMENSIONS:1024}
+    # 通义 text-embedding-v3 单次最多 10 条（Spike S3）
+    batch-size: 10
+    model: ${AI_EMBEDDING_MODEL:text-embedding-v3}

@@ -1,6 +1,7 @@
 # 密钥与本地数据
 .env
 data/
+http-client.private.env.json
 
 # 构建产物
 target/

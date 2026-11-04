@@ -9,6 +9,7 @@ public enum ErrorCode {
 
     BAD_REQUEST(HttpStatus.BAD_REQUEST, "请求参数错误"),
     VALIDATION_FAILED(HttpStatus.BAD_REQUEST, "参数校验失败"),
+    INVALID_FILE(HttpStatus.BAD_REQUEST, "只支持 PDF 文件"),
     UNAUTHORIZED(HttpStatus.UNAUTHORIZED, "未登录或登录已过期"),
     BAD_CREDENTIALS(HttpStatus.UNAUTHORIZED, "用户名或密码错误"),
     ACCOUNT_DISABLED(HttpStatus.UNAUTHORIZED, "账号已停用"),

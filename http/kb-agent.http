@@ -1,0 +1,111 @@
+# 手动测试脚本（IntelliJ IDEA 自带的 HTTP Client）
+#
+# 准备：
+#   1. docker compose up -d，并用运行配置“KbAgentApplication (local)”启动后端
+#   2. 文档入库需要调用通义 Embedding：在 .env 中填写 AI_API_KEY
+#   3. 在本目录创建 http-client.private.env.json（已被 .gitignore 忽略）：
+#        { "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }
+# 使用：编辑器右上角的环境选 local，然后从上到下依次点击每个请求左侧的 ▶。
+# 后面的请求会用到前面请求保存下来的 token、知识库 ID 和文档 ID。
+
+### 1. 管理员登录（保存 token）
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{"username": "admin", "password": "{{password}}"}
+
+> {%
+    client.global.set("adminToken", response.body.data.accessToken);
+    client.global.set("adminRefresh", response.body.data.refreshToken);
+%}
+
+### 2. 当前用户（角色和区域范围来自服务端数据库）
+GET {{baseUrl}}/api/v1/users/me
+Authorization: Bearer {{adminToken}}
+
+### 3. 创建知识库
+POST {{baseUrl}}/api/v1/knowledge-bases
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"name": "差旅制度", "description": "手动测试", "visibility": "PRIVATE"}
+
+> {% client.global.set("kbId", response.body.data.id); %}
+
+### 4. 上传示例 PDF（新文档返回 202；在同一知识库再传一次，返回 200 和已有文档）
+POST {{baseUrl}}/api/v1/knowledge-bases/{{kbId}}/documents
+Authorization: Bearer {{adminToken}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="file"; filename="sample-travel-policy.pdf"
+Content-Type: application/pdf
+
+< ./sample-travel-policy.pdf
+--WebAppBoundary--
+
+> {% client.global.set("docId", response.body.data.id); %}
+
+### 5. 文档详情：多点几次，直到 status 变为 READY（task 中有尝试次数，失败时看 errorCode）
+GET {{baseUrl}}/api/v1/documents/{{docId}}
+Authorization: Bearer {{adminToken}}
+
+### 6. 切分结果：每个 chunk 都带页码，相邻 chunk 有重叠
+GET {{baseUrl}}/api/v1/documents/{{docId}}/chunks?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 7. 知识库中的文档列表（可以加 &status=READY 过滤）
+GET {{baseUrl}}/api/v1/knowledge-bases/{{kbId}}/documents?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 8. 普通员工登录
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{"username": "user", "password": "{{password}}"}
+
+> {%
+    client.global.set("userToken", response.body.data.accessToken);
+    client.global.set("userId", response.body.data.user.id);
+%}
+
+### 9. 普通员工访问管理员的私有知识库：404（不暴露它是否存在）
+GET {{baseUrl}}/api/v1/knowledge-bases/{{kbId}}
+Authorization: Bearer {{userToken}}
+
+### 10. 普通员工访问用户管理：403
+GET {{baseUrl}}/api/v1/admin/users
+Authorization: Bearer {{userToken}}
+
+### 11. 把普通员工加为只读成员。之后再执行 9 能看到知识库，但上传文档仍然是 403
+PUT {{baseUrl}}/api/v1/knowledge-bases/{{kbId}}/members/{{userId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"permission": "READER"}
+
+### 12. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
+POST {{baseUrl}}/api/v1/auth/refresh
+Content-Type: application/json
+
+{"refreshToken": "{{adminRefresh}}"}
+
+> {%
+    client.global.set("adminToken", response.body.data.accessToken);
+    client.global.set("adminRefresh", response.body.data.refreshToken);
+%}
+
+### 13. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
+DELETE {{baseUrl}}/api/v1/documents/{{docId}}
+Authorization: Bearer {{adminToken}}
+
+### 14. 用户列表（管理员）
+GET {{baseUrl}}/api/v1/admin/users?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 15. 登出：之后用旧 token 执行 2 会返回 401
+POST {{baseUrl}}/api/v1/auth/logout
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"refreshToken": "{{adminRefresh}}"}

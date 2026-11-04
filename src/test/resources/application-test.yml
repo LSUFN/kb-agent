@@ -1,4 +1,11 @@
 # 测试 profile：所有 Spring 测试都通过 @ActiveProfiles("test") 激活。
+spring:
+  ai:
+    model:
+      # 不创建真实的模型客户端；集成测试使用 FakeEmbeddingModel（见 TestcontainersConfiguration），不需要 API Key
+      chat: none
+      embedding: none
+
 app:
   security:
     jwt:
@@ -6,3 +13,11 @@ app:
       secret: test-only-jwt-secret-do-not-use-in-any-real-environment
     # 集成测试共用同一个客户端 IP，调高登录限流避免用例之间相互影响；限流行为由 RedisRateLimiterIT 单独验证
     login-rate-limit-per-minute: 10000
+  storage:
+    root: target/it-storage
+  task:
+    # 缩短扫描间隔和重试退避，让异步流程在测试中几秒内完成
+    scan-interval: 200ms
+    lease-duration: 30s
+    retry-base-delay: 100ms
+    retry-max-delay: 1s

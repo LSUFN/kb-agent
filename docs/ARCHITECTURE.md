@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.3（2026-11-04）· **状态：M0、M1 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1 的验收标准已由集成测试验证（§4.8）。M2 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.4（2026-11-04）· **状态：M0、M1、M2 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1、M2 的验收标准已验证（§4.8、§4.9）。M3 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.4 变更：M2 落地，新增 §4.9 记录实现细节和设计调整，包括：PDF 解析改为直接使用 PDFBox；`GET /knowledge-bases/{kbId}` 对 READ 级别开放；只有清空了文档的知识库才能删除。
 > v0.2.3 变更：M1 落地，新增 §4.8 认证与会话的实现细节和 ADR-13、ADR-14；演示账号改为启动时初始化，不再使用 Flyway V3（§5）；分页参数 `page` 从 1 开始（§6.1）。
 > v0.2.2 变更：回填 Spike 结论（§2.2）；版本锁定为 Boot 4.1.2 + Spring AI 2.0.2；通义 base-url 必须以 `/v1` 结尾；Embedding 批大小定为 10；确认 observation 内容记录的属性名（§4.6）；§4.4 的异常终止方案经 S4 验证，保持 L0。
 > v0.2.1 变更：Embedding 批大小改为由 S3 实测确定（默认不超过 10 条）；M0 的 Spike 代码位于 `spikes/`。
@@ -83,7 +84,7 @@
 | 持久层 | Spring Data JPA（Hibernate 7）+ `JdbcClient` | 普通 CRUD 用 JPA；向量检索、任务领取、统计 SQL 用 JdbcClient |
 | 数据库迁移 | Flyway | |
 | 安全 | Spring Security 7 + `oauth2-resource-server`（JWT） | |
-| PDF 解析 | `spring-ai-pdf-document-reader`（基于 PDFBox） | 按页读取 |
+| PDF 解析 | PDFBox 3（`PDFTextStripper`） | 按页读取；没有使用 `spring-ai-pdf-document-reader`，原因见 §4.9 |
 | 测试 | JUnit 5、Mockito、AssertJ、Testcontainers、Spring Security Test、ArchUnit | |
 | 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia + Vue Router + Axios；`markdown-it` + `DOMPurify` + `highlight.js`；`@microsoft/fetch-event-source` | |
 | 部署 | Docker Compose v2：postgres、redis、backend、frontend（Nginx） | |
@@ -445,6 +446,40 @@ chatClient.prompt()
 - `/actuator/health` 公开；`/actuator/prometheus` 等其余端点只对 ADMIN 开放。
 - 模块依赖方向：`security → user`，`user` 不感知 JWT 和 Redis 中的令牌。用 ArchUnit 约束，同时约束顶层模块之间没有循环依赖。
 
+### 4.9 知识库与入库（M2 实现）
+
+§4.1–§4.3 的设计已按原样落地。下面记录实现时补充的细节，以及和原设计不一致的地方。
+
+**模块与依赖方向**：`document → knowledge / storage / task`。`task` 是通用模块，不认识文档：业务方实现 `TaskHandler`，任务模块负责领取、续租、fencing、重试和状态流转。`storage` 通过端口 `StoredFileReferences` 查询“哪些文件被引用”，由文档模块实现，所以 `storage` 不反向依赖 `document`。这些方向都由 ArchUnit 的“无循环依赖”规则约束。
+
+**知识库权限**：`KbPermissionService` 是唯一入口。访问级别分为 NONE / READ / EDIT / MANAGE：ADMIN 和所有者是 MANAGE，EDITOR 成员是 EDIT，READER 成员和公开知识库是 READ。没有任何访问权限时返回 404，有权查看但级别不够时返回 403。文档接口先按文档找到所属知识库，再用同一套规则判断。
+
+**任务执行（§4.2 的补充）**：
+- 执行者是虚拟线程，并发数由信号量限制（每个实例 2 个）。定时扫描和“提交后唤醒”共用一把扫描锁；扫描进行中收到的唤醒会合并为“本轮结束后再扫一轮”，不会漏掉刚提交的任务。
+- 租约过期、而且已经是最后一次尝试的任务，由扫描器直接转为 DEAD，不再领取。执行者在处理过程中反复死亡（例如内存溢出）时，任务走不到正常的失败分支，需要靠这一步兜底，否则会被无限次重新领取。
+- 结果分类：处理器在提交事务中调用 `complete()` 表示成功；`NonRetryableTaskException` 转为 FAILED；其他异常按指数退避重试，最后一次仍失败则转为 DEAD；`LeaseLostException` 表示租约已被接管或任务已被取消，直接放弃。
+- 错误信息分两层：`async_task.last_error` 记录完整的内部错误（包括上游原因），只用于排查；文档的 `error_message` 和接口返回的只有错误码和面向用户的说明（§4.6）。
+- 删除流程和入库提交都**先锁文档行、再改任务表**，加锁顺序一致，避免两者互相等待造成死锁。
+
+**入库（§4.3 的补充）**：
+- PDF 解析直接使用 PDFBox 3 的 `PDFTextStripper` 按页提取，没有用 `spring-ai-pdf-document-reader`。我们有自己的 chunk 模型（ADR-02），只需要“页码 + 文本”，这样依赖更少、行为可控。PDF 已加密返回 `PDF_ENCRYPTED`，文件损坏返回 `CORRUPT_PDF`，扫描件没有文本返回 `NO_EXTRACTABLE_TEXT`，都不重试。
+- 切分器每个片段的上限是“chunk 大小减去重叠”，所以加上 80 字重叠后也不会超过 500 字。重叠部分如果包含句子边界，就从边界之后开始，避免新 chunk 以半句话开头。切分前会去掉 NUL 字符，因为 PostgreSQL 的 TEXT 不能包含它。
+- Embedding 错误分类：Spring AI 2.0 直接抛出 OpenAI SDK 的异常，没有经过 spring-ai-retry 包装。所以由 `EmbeddingClient` 自己分类：408/409/429/5xx 和网络错误可以重试，其他错误不重试；返回的向量数量和维度也会逐一校验。
+- 启动时校验 `app.embedding.dimensions` 与 `doc_chunk.embedding` 的列维度（读取 `pg_attribute.atttypmod`），不一致就拒绝启动。
+
+**接口上的调整**：
+- `GET /knowledge-bases/{kbId}` 对 READ 级别开放（原设计是所有者和 ADMIN），这样知识库详情页对成员可用。修改和删除知识库仍然需要 MANAGE。
+- 新增 `GET /knowledge-bases/{kbId}/members`（MANAGE），供成员管理页面使用。
+- 知识库中还有文档（包括正在删除的）时不能删除，返回 409。这样避免在同一个请求里级联删除大量文件。
+- 上传遇到同一知识库中内容相同的文档时，无论那个文档是什么状态（包括 FAILED），都返回 200 和已有文档。用户可以对它执行“重新处理”。
+
+**验收结果（2026-11-04）**：§7 中入库、补偿、任务恢复、事务边界、删除竞争的集成测试全部通过（见 README 的 M2 验收清单）。真实 PDF 用的是一份 54 页的英文文档（1.5MB），调用真实的通义 `text-embedding-v3`，每批 10 条：
+
+- 上传接口 0.13 秒返回 202。
+- 9.3 秒后变为 READY，第一次尝试就成功，没有重试。
+- 得到 186 个 chunk，覆盖 53 页（另 1 页没有可提取的文本）。
+- chunk 长度在 82 到 500 字之间，平均 396 字。
+
 ---
 
 ## 5. 数据库表设计
@@ -682,8 +717,9 @@ CREATE INDEX idx_anomaly_time_type ON biz_anomaly_event(occurred_at, event_type)
 | GET | `/users/me` | 登录 | 返回角色和区域范围（前端据此控制菜单显示，但**真正的权限由后端判断**） |
 | POST / GET / PATCH | `/admin/users[/{id}]` | ADMIN | 创建用户、启用/停用、修改角色和 `regionScope` |
 | POST / GET | `/knowledge-bases` | 登录 | 列表只返回有权限的知识库 |
-| GET / PATCH / DELETE | `/knowledge-bases/{kbId}` | owner / ADMIN | |
-| PUT / DELETE | `/knowledge-bases/{kbId}/members/{userId}` | owner / ADMIN | |
+| GET / PATCH / DELETE | `/knowledge-bases/{kbId}` | GET：READER；PATCH / DELETE：owner / ADMIN | 还有文档时不能删除（409）；返回值带 `myAccess`（当前用户的访问级别） |
+| GET | `/knowledge-bases/{kbId}/members` | owner / ADMIN | 成员列表（M2 新增） |
+| PUT / DELETE | `/knowledge-bases/{kbId}/members/{userId}` | owner / ADMIN | 请求体 `{permission: READER\|EDITOR}`；删除是幂等的 |
 | POST | `/knowledge-bases/{kbId}/documents` | EDITOR | multipart 上传 → 202 `{documentId, status}`；重复文件 → 200 返回已有文档 |
 | GET | `/knowledge-bases/{kbId}/documents` | READER | 可按状态过滤 |
 | GET | `/documents/{docId}` | READER | 返回状态、错误码、任务尝试次数（供前端轮询） |
@@ -772,7 +808,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 |---|---|---|
 | **M0 骨架 + Spike** ✅ 2026-11-04 完成 | 锁定版本；Maven 工程和包结构；Compose（postgres + redis）；Flyway V1；统一响应和异常；TraceId；Actuator；ArchUnit；`.env.example`；完成 Spike S1–S5 并把结论写回 §2.2 | `docker compose up -d` 后 health 返回 UP；`mvn verify` 在没有 Key 的情况下通过；仓库中没有密钥；§2.2 的 5 项都有明确结论和选定的退路 |
 | **M1 认证与权限** ✅ 2026-11-04 完成 | 用户、JWT、Refresh Token 轮换、登出黑名单、角色、区域范围、限流、`/admin/users` | 三种角色可以登录；401/403/404 的语义符合约定；登出后旧 Token 失效；账号停用后立即失效 |
-| **M2 知识库与入库** | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
+| **M2 知识库与入库** ✅ 2026-11-04 完成 | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
 | **M3 KB_QA 与会话** | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
 | **M4 Agent 与工具** | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
 | **M5 前端** | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |

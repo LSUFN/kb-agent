@@ -1,18 +1,41 @@
 package com.example.kbagent.support;
 
+import java.nio.file.Path;
+import java.util.UUID;
+
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
+import org.springframework.test.context.DynamicPropertyRegistrar;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * 集成测试共用的容器：与 docker-compose.yml 使用同一镜像，保证 Flyway 脚本在真实的 pgvector 上执行。
- * 通过 @ServiceConnection 自动覆盖数据源与 Redis 连接配置。
+ * 集成测试共用的基础设施：
+ * <ul>
+ *   <li>容器：与 docker-compose.yml 使用同一镜像，保证 Flyway 脚本在真实的 pgvector 上执行；
+ *       通过 @ServiceConnection 自动覆盖数据源与 Redis 连接配置</li>
+ *   <li>FakeEmbeddingModel：test profile 关闭了真实的模型客户端，集成测试不需要 API Key</li>
+ * </ul>
  */
 @TestConfiguration(proxyBeanMethods = false)
 public class TestcontainersConfiguration {
+
+    @Bean
+    FakeEmbeddingModel fakeEmbeddingModel() {
+        return new FakeEmbeddingModel(1024);
+    }
+
+    /**
+     * 每个测试上下文使用独立的存储目录：每个上下文都有全新的数据库，知识库 ID 从 1 开始，
+     * 共用目录会让不同上下文（以及多次运行）的文件互相干扰。
+     */
+    @Bean
+    DynamicPropertyRegistrar isolatedStorageRoot() {
+        String root = Path.of("target", "it-storage", UUID.randomUUID().toString()).toString();
+        return registry -> registry.add("app.storage.root", () -> root);
+    }
 
     @Bean
     @ServiceConnection

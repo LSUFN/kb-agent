@@ -2,7 +2,7 @@
 
 基于 Java 21 + Spring Boot 4.1 + Spring AI 2.0 的企业知识库问答（RAG）与业务分析 Agent 平台，作为 Java 后端工程实践作品。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-> **当前进度：M0（工程骨架 + 技术验证）和 M1（认证与权限）已完成（2026-11-04），下一阶段是 M2 知识库与入库。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
+> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）已完成（2026-11-04），下一阶段是 M3 知识库问答。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
 
 ## 当前状态
 
@@ -14,7 +14,8 @@
 | Flyway V1（13 张表 + pgvector + HNSW 索引） | ✅ 在 Testcontainers（`pgvector/pgvector:pg17`）和 Compose 的 PostgreSQL 上都执行成功 |
 | Docker Compose（PostgreSQL + pgvector、Redis） | ✅ 两个容器都为 healthy；停掉 Redis 时 health 变为 `DOWN`（503），恢复后回到 `UP` |
 | 认证与权限（M1） | ✅ JWT 登录、Refresh Token 轮换与重用检测、登出黑名单、三种角色与区域范围、登录限流、用户管理接口；集成测试和本机冒烟检查都已通过 |
-| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 85 个，集成测试 23 个，不需要 API Key |
+| 知识库与文档入库（M2） | ✅ 知识库与成员权限、PDF 上传（去重、补偿、对账）、`async_task` 任务表（并发领取、租约、fencing、重试）、中文切分、Embedding 入库、异步删除和重新处理；真实的 54 页 PDF 9.3 秒变为 READY |
+| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 163 个，集成测试 46 个，不需要 API Key |
 | Spike S1–S5 | ✅ 已在真实通义接口上执行（14 个用例全部通过），结论见 [ARCHITECTURE.md §2.2](docs/ARCHITECTURE.md) |
 
 ### M0 技术验证的主要结论
@@ -48,6 +49,34 @@
 
 **演示账号**：local profile 启动时自动创建 `admin`（ADMIN）、`analyst`（ANALYST，区域 EAST）、`user`（USER）三个账号，初始密码是 `.env` 里的 `DEMO_USER_PASSWORD`。只在账号不存在时创建，之后修改 `.env` 不会改变已有账号的密码。
 
+## 知识库与文档入库（M2）
+
+设计见 [ARCHITECTURE.md §4.1–§4.3](docs/ARCHITECTURE.md)，实现细节和设计调整见 §4.9。
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST / GET | `/knowledge-bases` | 登录 | 创建（创建者为所有者）；列表只返回有权访问的知识库 |
+| GET / PATCH / DELETE | `/knowledge-bases/{kbId}` | 查看：READER；修改、删除：所有者或 ADMIN | 还有文档时不能删除（409） |
+| GET / PUT / DELETE | `/knowledge-bases/{kbId}/members[/{userId}]` | 所有者或 ADMIN | 成员权限为 `READER` 或 `EDITOR` |
+| POST | `/knowledge-bases/{kbId}/documents` | EDITOR | multipart 字段 `file`，只接受 PDF（≤ 20MB）。新文档返回 202，同一知识库中内容相同的文档返回 200 和已有文档 |
+| GET | `/knowledge-bases/{kbId}/documents` | READER | 可按 `status` 过滤 |
+| GET | `/documents/{docId}` | READER | 状态、错误码，以及最近一次入库任务的尝试次数（供前端轮询） |
+| POST | `/documents/{docId}/reprocess` | EDITOR | 只有 READY 或 FAILED 的文档可以重新处理，否则 409 |
+| DELETE | `/documents/{docId}` | EDITOR | 返回 202，文档进入 DELETING，文件和记录异步删除 |
+| GET | `/documents/{docId}/chunks` | READER | 分页查看切分结果（含页码） |
+
+几条关键行为：
+
+- **无权访问返回 404，权限不够返回 403**：不是成员时，知识库和其中的文档都显示为“不存在”。
+- **入库是异步的**：上传接口只负责保存文件和登记任务，后台执行“解析 → 切分（约 500 字，重叠 80 字，不跨页）→ Embedding（每批 10 条）→ 写入向量”。调用外部服务期间不开事务、不占用数据库连接。
+- **可靠性**：
+  - 上游的 429、5xx 和网络错误会按指数退避重试，最多 5 次；PDF 损坏、加密或没有文本则直接失败，不重试。
+  - 处理中的执行者如果死亡，租约到期后任务由其他执行者接管，旧执行者的结果写不进去。
+  - 处理过程中删除文档，不会留下残留数据。
+- **文件与数据库的一致性**：先写文件、再提交数据库，数据库失败时删除已写的文件；进程崩溃留下的孤儿文件由每小时一次的对账清理。
+
+本地运行时，文档入库需要在 `.env` 中填写 `AI_API_KEY`（通义 DashScope Key）；集成测试使用假的 Embedding 模型，不需要 Key。
+
 ## 环境要求
 
 - JDK 21
@@ -79,6 +108,14 @@ curl -i http://localhost:8080/api/v1/system/ping
 $login = Invoke-RestMethod -Method Post http://localhost:8080/api/v1/auth/login -ContentType 'application/json' -Body '{"username":"analyst","password":"<密码>"}'
 Invoke-RestMethod http://localhost:8080/api/v1/users/me -Headers @{ Authorization = "Bearer $($login.data.accessToken)" }
 ```
+
+### 手动测试接口
+
+[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
+
+1. 启动基础设施和后端（见上文）。文档入库要调用通义 Embedding，需要先在 `.env` 中填写 `AI_API_KEY`。
+2. 在 `http/` 目录创建 `http-client.private.env.json`（已被 `.gitignore` 忽略）：`{ "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }`。
+3. 打开 `kb-agent.http`，右上角的环境选 `local`，从上到下依次点击每个请求左侧的 ▶。
 
 ### 在 IntelliJ IDEA 中运行
 
@@ -128,11 +165,20 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 - [x] Refresh Token 轮换；旧令牌被重复使用时撤销整个令牌族
 - [x] 登录限流：超出后返回 429 和 `Retry-After`（`RedisRateLimiterIT`，以及本机实测）
 
+## M2 验收清单（2026-11-04 在本机执行完毕）
+
+- [x] 入库：上传后轮询到 READY，chunk 数量和页码正确且不跨页；重复上传幂等；并发上传同一个文件只留下一条记录和一个文件（`DocumentIngestionIT`）
+- [x] 补偿：数据库插入失败时删除已移动的文件；孤儿文件过了宽限期才清理，被引用的文件保留（`UploadCompensationIT`、`StorageReconcilerIT`）
+- [x] 任务恢复：执行者死亡后被接管，旧执行者被 fencing 拒绝；提交事件丢失时任务仍被扫描器执行；前两次失败、第三次成功时 attempt 为 3（`TaskRecoveryIT`、`AsyncTaskRepositoryIT`）
+- [x] 事务边界：Embedding 阻塞期间数据库活跃连接数为 0，且调用时不在事务中（`IngestionConsistencyIT`）
+- [x] 删除竞争：入库处理过程中删除文档，最终没有残留 chunk，文件被删除（`IngestionConsistencyIT`）
+- [x] 真实 PDF：54 页英文文档（1.5MB）使用通义 `text-embedding-v3`，9.3 秒变为 READY，共 186 个 chunk，没有重试
+
 ## 目录结构
 
 ```
 .
-├── docs/ARCHITECTURE.md        架构设计（v0.2.3）
+├── docs/ARCHITECTURE.md        架构设计（v0.2.4）
 ├── docker-compose.yml          基础设施
 ├── .env.example                环境变量模板
 ├── pom.xml
@@ -141,14 +187,19 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 │   ├── common/error            错误码、业务异常、全局异常处理
 │   ├── common/ratelimit        Redis 令牌桶限流
 │   ├── common/trace            traceId 过滤器
-│   ├── config                  安全配置（JWT 资源服务器）、Clock
+│   ├── config                  安全配置（JWT 资源服务器）、定时调度、Clock
 │   ├── security                JWT 签发、Refresh Token 轮换、登出黑名单、当前用户加载、登录/刷新/登出
 │   ├── user                    用户、角色、区域范围、用户管理接口、演示账号初始化
+│   ├── knowledge               知识库、成员、访问级别判断（KbPermissionService）
+│   ├── document                文档上传、删除、重新处理；入库流水线（PDF 解析、切分、Embedding）
+│   ├── storage                 文件存储（本地实现）与孤儿文件对账
+│   ├── task                    通用异步任务：扫描、领取、租约、fencing、重试
 │   └── system/web              冒烟接口
 ├── src/main/resources
 │   ├── application.yml
 │   ├── application-local.yml   本地开发 profile（读取 .env，创建演示账号）
 │   └── db/migration/V1__init.sql
 ├── src/test/java/...           单元测试、接口切片测试、ArchUnit、集成测试
+├── http/                       手动测试脚本（IntelliJ HTTP Client）和示例 PDF
 └── spikes/                     M0 技术验证（独立 Maven 工程，结论见 ARCHITECTURE.md §2.2）
 ```
