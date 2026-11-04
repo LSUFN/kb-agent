@@ -2,6 +2,7 @@ package com.example.kbagent.document.repository;
 
 import java.util.List;
 
+import com.example.kbagent.common.vector.VectorLiterals;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -38,7 +39,7 @@ public class DocChunkRepository {
                     ps.setInt(4, chunk.pageNumber());
                     ps.setString(5, chunk.content());
                     ps.setInt(6, chunk.content().length());
-                    ps.setString(7, toVectorLiteral(chunk.embedding()));
+                    ps.setString(7, VectorLiterals.toLiteral(chunk.embedding()));
                 });
     }
 
@@ -59,17 +60,5 @@ public class DocChunkRepository {
                 (rs, n) -> new StoredChunk(rs.getInt("chunk_index"), rs.getInt("page_number"),
                         rs.getInt("char_count"), rs.getString("content")),
                 documentId, offset, limit);
-    }
-
-    /** pgvector 的文本格式：[0.1,0.2,...]。 */
-    static String toVectorLiteral(float[] vector) {
-        StringBuilder sb = new StringBuilder(vector.length * 10).append('[');
-        for (int i = 0; i < vector.length; i++) {
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append(vector[i]);
-        }
-        return sb.append(']').toString();
     }
 }

@@ -1,0 +1,53 @@
+package com.example.kbagent.chat.service;
+
+import java.time.Instant;
+import java.util.List;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+
+import com.example.kbagent.chat.domain.Citation;
+import com.example.kbagent.chat.domain.CitationMode;
+import com.example.kbagent.chat.domain.Conversation;
+import com.example.kbagent.chat.domain.ConversationMode;
+import com.example.kbagent.chat.domain.MessageRole;
+import com.example.kbagent.chat.domain.MessageStatus;
+
+/** 会话和消息接口的请求与响应。 */
+public final class ConversationCommands {
+
+    private ConversationCommands() {
+    }
+
+    /** @param kbId 为 null 时在当前用户有权访问的全部知识库中检索 */
+    public record CreateConversation(@NotNull ConversationMode mode, Long kbId, @Size(max = 128) String title) {
+    }
+
+    public record RenameConversation(@NotBlank @Size(max = 128) String title) {
+    }
+
+    public record SendMessage(@NotBlank @Size(max = 2000) String content) {
+    }
+
+    public record ConversationView(long id, String title, ConversationMode mode, Long kbId, Instant createdAt,
+                                   Instant updatedAt) {
+
+        public static ConversationView of(Conversation c) {
+            return new ConversationView(c.id(), c.title(), c.mode(), c.kbId(), c.createdAt(), c.updatedAt());
+        }
+    }
+
+    /** @param citations 没有引用时为空列表 */
+    public record MessageView(long id, MessageRole role, String content, MessageStatus status,
+                              CitationMode citationMode, List<Citation> citations, String errorCode, String traceId,
+                              Instant createdAt) {
+    }
+
+    /** 非流式接口的返回值：把一轮问答的事件汇总成一个结果。 */
+    public record ChatReply(long messageId, long userMessageId, String traceId, MessageStatus status, String content,
+                            CitationMode citationMode, List<Citation> citations, List<Integer> invalidIndices,
+                            List<ChatEvent.RetrievedCandidate> candidates, ChatEvent.Usage usage, long latencyMs,
+                            Integer firstTokenMs) {
+    }
+}

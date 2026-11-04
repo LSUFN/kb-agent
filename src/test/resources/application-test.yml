@@ -2,7 +2,7 @@
 spring:
   ai:
     model:
-      # 不创建真实的模型客户端；集成测试使用 FakeEmbeddingModel（见 TestcontainersConfiguration），不需要 API Key
+      # 不创建真实的模型客户端；集成测试使用 FakeChatModel、FakeEmbeddingModel（见 TestcontainersConfiguration），不需要 API Key
       chat: none
       embedding: none
 
@@ -21,3 +21,8 @@ app:
     lease-duration: 30s
     retry-base-delay: 100ms
     retry-max-delay: 1s
+  chat:
+    # 集成测试共用同一批用户，调高提问限流；限流行为由 KbQaServiceTest 和 RedisRateLimiterIT 验证
+    rate-limit-per-minute: 10000
+    # 缩短心跳，验证心跳和断开检测
+    heartbeat-interval: 1s

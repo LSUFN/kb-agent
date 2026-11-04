@@ -33,6 +33,10 @@ spring:
     multipart:
       max-file-size: 20MB
       max-request-size: 21MB
+  mvc:
+    async:
+      # SSE 一轮问答最长 5 分钟（与 Nginx 读超时 300 秒一致，§6.4）；必须小于 app.chat.stale-stream-timeout
+      request-timeout: 5m
   ai:
     model:
       # 只使用 Chat（M3 起）和 Embedding（M2 起），其余模型不创建
@@ -52,6 +56,20 @@ spring:
         options:
           model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
           dimensions: ${AI_EMBEDDING_DIMENSIONS:1024}
+    # §4.6：Spring AI 自带的 observation 不记录 Prompt、回答和工具内容。2.0.2 的默认值都是 false，
+    # 这里显式写出，防止升级后默认值变化（ApplicationIT 断言实际生效的值）
+    chat:
+      client:
+        observations:
+          log-prompt: false
+          log-completion: false
+      observations:
+        log-prompt: false
+        log-completion: false
+        include-error-logging: false
+    tools:
+      observations:
+        include-content: false
 
 server:
   shutdown: graceful
@@ -109,3 +127,19 @@ app:
     # 通义 text-embedding-v3 单次最多 10 条（Spike S3）
     batch-size: 10
     model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
+  retrieval:
+    top-k: 5
+    # 余弦相似度阈值：一个片段都达不到时直接拒答、不调用模型。按真实模型校准，见 README M3
+    min-score: ${APP_RETRIEVAL_MIN_SCORE:0.5}
+    ef-search: 100
+  chat:
+    # 每个用户每分钟最多提问次数（§4.7）
+    rate-limit-per-minute: ${APP_RATE_LIMIT_PER_MINUTE:20}
+    history-rounds: 3
+    heartbeat-interval: 15s
+    stale-stream-timeout: 10m
+    stale-scan-interval: 1m
+  llm-log:
+    # NONE：不记录用户问题；MASKED_PREVIEW：脱敏后记录前 200 字（§4.6）
+    content: ${APP_LLM_LOG_CONTENT:MASKED_PREVIEW}
+    retention-days: ${APP_LOG_RETENTION_DAYS:30}

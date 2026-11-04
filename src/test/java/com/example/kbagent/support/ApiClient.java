@@ -2,8 +2,11 @@ package com.example.kbagent.support;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -11,6 +14,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -24,7 +29,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
-/** 集成测试使用的 HTTP 客户端：统一响应体解析、登录、multipart 上传、轮询。 */
+/** 集成测试使用的 HTTP 客户端：统一响应体解析、登录、multipart 上传、SSE、轮询。 */
 public final class ApiClient {
 
     public static final String PASSWORD = "Passw0rd!";
@@ -42,6 +47,36 @@ public final class ApiClient {
 
     /** 登录后的用户。 */
     public record User(long id, String username, String token) {
+    }
+
+    /** 一个 SSE 事件，data 按 JSON 解析。 */
+    public record SseEvent(String name, JsonNode data) {
+    }
+
+    /**
+     * 一次 SSE 请求的结果。
+     *
+     * @param comments  收到的注释行（心跳 {@code :ping}）数量
+     * @param errorBody 状态码不是 200 时的 JSON 响应体
+     */
+    public record SseStream(int status, List<SseEvent> events, int comments, JsonNode errorBody) {
+
+        public List<String> names() {
+            return events.stream().map(SseEvent::name).toList();
+        }
+
+        public SseEvent first(String name) {
+            return events.stream().filter(e -> e.name().equals(name)).findFirst()
+                    .orElseThrow(() -> new AssertionError("no '" + name + "' event in " + names()));
+        }
+
+        /** 所有 delta 拼起来的文本。 */
+        public String text() {
+            StringBuilder text = new StringBuilder();
+            events.stream().filter(e -> e.name().equals("delta"))
+                    .forEach(e -> text.append(e.data().path("text").asString()));
+            return text.toString();
+        }
     }
 
     private final int port;
@@ -68,6 +103,11 @@ public final class ApiClient {
                 .PUT(HttpRequest.BodyPublishers.ofString(jsonBody)));
     }
 
+    public Response patch(String path, User user, String jsonBody) {
+        return send(request(path, user).header("Content-Type", "application/json")
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(jsonBody)));
+    }
+
     public Response delete(String path, User user) {
         return send(request(path, user).DELETE());
     }
@@ -81,6 +121,66 @@ public final class ApiClient {
         body.writeBytes(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
         return send(request(path, user).header("Content-Type", "multipart/form-data; boundary=" + boundary)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body.toByteArray())));
+    }
+
+    /** POST 到 SSE 接口并读到流结束。 */
+    public SseStream stream(String path, User user, String jsonBody) {
+        return stream(path, user, jsonBody, Integer.MAX_VALUE);
+    }
+
+    /**
+     * POST 到 SSE 接口；收到 deltasBeforeDisconnect 个 delta 事件后主动关闭连接（模拟用户点击“停止生成”），
+     * 返回关闭前收到的事件。
+     */
+    public SseStream stream(String path, User user, String jsonBody, int deltasBeforeDisconnect) {
+        HttpRequest request = request(path, user)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+        try {
+            HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            if (response.statusCode() != 200) {
+                try (InputStream body = response.body()) {
+                    String text = new String(body.readAllBytes(), StandardCharsets.UTF_8);
+                    return new SseStream(response.statusCode(), List.of(), 0,
+                            text.isBlank() ? json.missingNode() : json.readTree(text));
+                }
+            }
+            List<SseEvent> events = new ArrayList<>();
+            int comments = 0;
+            int deltas = 0;
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
+                String name = null;
+                StringBuilder data = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isEmpty()) {
+                        if (!data.isEmpty()) {
+                            events.add(new SseEvent(name == null ? "message" : name, json.readTree(data.toString())));
+                            if ("delta".equals(name) && ++deltas >= deltasBeforeDisconnect) {
+                                break;
+                            }
+                        }
+                        name = null;
+                        data.setLength(0);
+                    } else if (line.startsWith(":")) {
+                        comments++;
+                    } else if (line.startsWith("event:")) {
+                        name = line.substring("event:".length()).strip();
+                    } else if (line.startsWith("data:")) {
+                        data.append(line.substring("data:".length()));
+                    }
+                }
+            }
+            return new SseStream(200, List.copyOf(events), comments, json.missingNode());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     /** 在数据库中创建用户并登录。 */

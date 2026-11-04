@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 应用日志按 SensitiveDataMasker 的规则脱敏（§4.6）：覆盖 Spring Boot 默认格式中的 %m / %msg / %message -->
+    <conversionRule conversionWord="m" class="com.example.kbagent.observability.MaskingMessageConverter"/>
+    <conversionRule conversionWord="msg" class="com.example.kbagent.observability.MaskingMessageConverter"/>
+    <conversionRule conversionWord="message" class="com.example.kbagent.observability.MaskingMessageConverter"/>
+
+    <!-- 与 Spring Boot 的默认行为一致：只输出到控制台 -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- 异常堆栈同样脱敏。defaults.xml 定义了 %wEx / %wex，这里必须写在它之后才能覆盖 -->
+    <conversionRule conversionWord="wEx" class="com.example.kbagent.observability.MaskingThrowableProxyConverter"/>
+    <conversionRule conversionWord="wex" class="com.example.kbagent.observability.MaskingThrowableProxyConverter"/>
+
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

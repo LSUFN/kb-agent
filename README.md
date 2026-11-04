@@ -2,7 +2,7 @@
 
 基于 Java 21 + Spring Boot 4.1 + Spring AI 2.0 的企业知识库问答（RAG）与业务分析 Agent 平台，作为 Java 后端工程实践作品。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）已完成（2026-11-04），下一阶段是 M3 知识库问答。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
+> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）、M3（知识库问答与会话）已完成（2026-11-05），下一阶段是 M4 Agent 与工具。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
 
 ## 当前状态
 
@@ -15,7 +15,8 @@
 | Docker Compose（PostgreSQL + pgvector、Redis） | ✅ 两个容器都为 healthy；停掉 Redis 时 health 变为 `DOWN`（503），恢复后回到 `UP` |
 | 认证与权限（M1） | ✅ JWT 登录、Refresh Token 轮换与重用检测、登出黑名单、三种角色与区域范围、登录限流、用户管理接口；集成测试和本机冒烟检查都已通过 |
 | 知识库与文档入库（M2） | ✅ 知识库与成员权限、PDF 上传（去重、补偿、对账）、`async_task` 任务表（并发领取、租约、fencing、重试）、中文切分、Embedding 入库、异步删除和重新处理；真实的 54 页 PDF 9.3 秒变为 READY |
-| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 163 个，集成测试 46 个，不需要 API Key |
+| 知识库问答（M3） | ✅ 检索调试接口、KB_QA 流程（检索不到时拒答且不调用模型）、SSE 事件协议、引用解析、会话与消息状态机、调用日志与脱敏；已用真实的 qwen-plus 和 text-embedding-v3 校准检索阈值和引用提示词 |
+| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 235 个，集成测试 65 个，不需要 API Key |
 | Spike S1–S5 | ✅ 已在真实通义接口上执行（14 个用例全部通过），结论见 [ARCHITECTURE.md §2.2](docs/ARCHITECTURE.md) |
 
 ### M0 技术验证的主要结论
@@ -77,6 +78,48 @@
 
 本地运行时，文档入库需要在 `.env` 中填写 `AI_API_KEY`（通义 DashScope Key）；集成测试使用假的 Embedding 模型，不需要 Key。
 
+## 知识库问答与会话（M3）
+
+设计见 [ARCHITECTURE.md §4.3、§4.5、§4.6、§6.3、§6.4](docs/ARCHITECTURE.md)，实现细节、实测数据和设计调整见 §4.10。
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| POST | `/knowledge-bases/{kbId}/search` | READER | 检索调试：`{query, topK?}` → 每个片段的相似度和是否达到问答阈值，不调用大模型 |
+| POST / GET | `/conversations` | 登录 / 本人 | 创建 `{mode: "KB_QA", kbId?, title?}`（不传 kbId 时在有权访问的全部知识库中检索）；列表按更新时间倒序，可按 `keyword` 搜索标题 |
+| GET / PATCH / DELETE | `/conversations/{id}` | 本人 | 详情、重命名、软删除 |
+| GET | `/conversations/{id}/messages?beforeId=&size=` | 本人 | 游标分页：`{items, nextBeforeId}`，items 按时间正序 |
+| POST | `/conversations/{id}/messages/stream` | 本人 | **主入口**，`{content}` → `text/event-stream` |
+| POST | `/conversations/{id}/messages` | 本人 | 非流式版本，一次返回完整结果 |
+| GET | `/admin/logs/llm-calls` | ADMIN | 模型调用日志（已脱敏），可按 traceId、用户、成败、时间过滤 |
+
+一次提问的事件流：
+
+```
+event:meta       data:{"messageId":124,"userMessageId":123,"traceId":"…"}
+event:retrieval  data:{"candidates":[{"index":1,"documentId":3,"filename":"sample-travel-policy.pdf","page":3,"score":0.743}, …]}
+event:delta      data:{"text":"出差结束后30天内"}          （多次）
+event:citations  data:{"mode":"NORMAL","citations":[{"index":1,"documentId":3,"page":3,"snippet":"…","score":0.743}],"invalidIndices":[]}
+event:done       data:{"status":"OK","usage":{"prompt":987,"completion":12,"estimated":false},"latencyMs":919,"firstTokenMs":609}
+:ping                                                     （等待期间每 15 秒一次心跳）
+```
+
+几条关键行为（都有集成测试覆盖，见 `KbQaIT`、`ChatLifecycleIT`）：
+
+- **检索不到就拒答，不调用模型**：没有片段的相似度达到阈值（默认 0.5）时，直接返回固定的拒答文案，`citations.mode` 为 `NONE`。只在用户有权访问的知识库中检索。
+- **引用一定指向本轮真实检索到的片段**：回答中的 `[n]` 由 `CitationParser` 确定性地映射到文档和页码；越界的编号（包括把“第九条”写成 `[9]`）放进 `invalidIndices`，不会映射到任何文档。回答没有合法引用时为 `FALLBACK`，把检索到的资料作为参考资料返回。
+- **停止生成**：客户端断开连接即停止。上游的模型请求随之取消，已生成的部分保存下来，消息标记为 `INTERRUPTED`。模型调用失败时推送 `error` 事件，消息标记为 `FAILED`。
+- **不在事务中调用模型**：问题和占位消息在一个短事务中保存，流式输出期间不占用数据库连接，结束时再用一个短事务写入最终结果。进程崩溃遗留的 `STREAMING` 消息 10 分钟后由扫描器收尾。
+- **限流**：每个用户每分钟 20 次提问（`APP_RATE_LIMIT_PER_MINUTE`），超出返回 429。开始输出之前的错误（404、429 等）即使请求头是 `Accept: text/event-stream`，也按普通 JSON 返回。
+- **脱敏**：`llm_call_log` 中的用户问题只保存脱敏后的前 200 字和 SHA-256，不记录 System Prompt、检索片段和完整回答。应用日志的消息和**异常堆栈**都按同样的规则脱敏（手机号、身份证号、银行卡号、邮箱、API Key、Bearer Token、JWT）。
+
+**用真实模型校准**（2026-11-05，qwen-plus + text-embedding-v3，详见 ARCHITECTURE.md §4.10）：
+
+- 检索阈值：相关问题的 top-1 相似度是 0.579–0.767，与文档领域无关的问题是 0.347–0.488，所以阈值保持 0.5。同一领域但文档没有覆盖的问题（例如在差旅制度上问年假）会越过阈值，由提示词让模型回答“根据现有资料无法回答”。
+- 引用提示词：第一版提示词下，qwen-plus 经常把条款号写成引用编号。加入正反例，并在问题之后重复一次引用要求后，同一批问题（5 个问题各 3 次）的合法引用从 6/15 提高到 15/15。
+- 停止生成：在第 5 个 delta 后断开，0.3 秒内消息变为 `INTERRUPTED`，调用日志记录为 `CLIENT_CLOSED`，耗时 0.8 秒（完整回答约 6 秒），说明上游请求确实被中止了。
+
+本地运行时，问答同样需要在 `.env` 中填写 `AI_API_KEY`；集成测试使用脚本化的假 Chat 模型和假 Embedding 模型，不需要 Key。
+
 ## 环境要求
 
 - JDK 21
@@ -111,9 +154,9 @@ Invoke-RestMethod http://localhost:8080/api/v1/users/me -Headers @{ Authorizatio
 
 ### 手动测试接口
 
-[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
+[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、检索调试、问答（流式和非流式）、拒答、历史消息、调用日志、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
 
-1. 启动基础设施和后端（见上文）。文档入库要调用通义 Embedding，需要先在 `.env` 中填写 `AI_API_KEY`。
+1. 启动基础设施和后端（见上文）。文档入库和问答都要调用通义，需要先在 `.env` 中填写 `AI_API_KEY`。
 2. 在 `http/` 目录创建 `http-client.private.env.json`（已被 `.gitignore` 忽略）：`{ "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }`。
 3. 打开 `kb-agent.http`，右上角的环境选 `local`，从上到下依次点击每个请求左侧的 ▶。
 
@@ -174,19 +217,29 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 - [x] 删除竞争：入库处理过程中删除文档，最终没有残留 chunk，文件被删除（`IngestionConsistencyIT`）
 - [x] 真实 PDF：54 页英文文档（1.5MB）使用通义 `text-embedding-v3`，9.3 秒变为 READY，共 186 个 chunk，没有重试
 
+## M3 验收清单（2026-11-05 在本机执行完毕）
+
+- [x] 引用合法性：`[1]`、`[1][2]`、`[1,2]`、`【1】` 等格式，越界、0、负数、重复、代码块内的编号（`CitationParserTest`）；合法编号映射到本轮检索到的文档、页码和片段，越界编号进入 `invalidIndices`；没有引用时进入 FALLBACK（`KbQaIT`）
+- [x] 问知识库里没有的内容时拒答，且不调用模型（`KbQaIT`、`KbQaServiceTest`；真实模型下 0.13–0.23 秒返回，没有 Chat 调用记录）
+- [x] 断开连接后消息为 INTERRUPTED，已生成的部分被保存，上游流被取消（`ChatLifecycleIT`；真实模型下 0.3 秒内完成）
+- [x] 日志中没有原文敏感信息：上游报错回显了手机号、身份证号和邮箱时，`llm_call_log` 和应用日志（包括第三方库打印的异常堆栈）中都没有原文（`KbQaIT`、`SensitiveDataMaskerTest`、`MaskingMessageConverterTest`）
+- [x] 其他：用户只能检索有权访问的知识库；别人的会话返回 404 且不写入任何数据；上游失败为 FAILED 并推送 error 事件；超时收尾、心跳、用量估算、游标分页；Spring AI observation 不记录内容（`ApplicationIT`）
+- [x] 真实模型端到端：qwen-plus + text-embedding-v3 完成检索阈值校准和引用提示词校准（见上文）
+
 ## 目录结构
 
 ```
 .
-├── docs/ARCHITECTURE.md        架构设计（v0.2.4）
+├── docs/ARCHITECTURE.md        架构设计（v0.2.5）
 ├── docker-compose.yml          基础设施
 ├── .env.example                环境变量模板
 ├── pom.xml
 ├── src/main/java/com/example/kbagent
-│   ├── common/api              统一响应 ApiResponse、分页 PageResponse
+│   ├── common/api              统一响应 ApiResponse、分页 PageResponse、游标分页 CursorPage
 │   ├── common/error            错误码、业务异常、全局异常处理
 │   ├── common/ratelimit        Redis 令牌桶限流
 │   ├── common/trace            traceId 过滤器
+│   ├── common/vector           pgvector 字面量转换
 │   ├── config                  安全配置（JWT 资源服务器）、定时调度、Clock
 │   ├── security                JWT 签发、Refresh Token 轮换、登出黑名单、当前用户加载、登录/刷新/登出
 │   ├── user                    用户、角色、区域范围、用户管理接口、演示账号初始化
@@ -194,10 +247,14 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 │   ├── document                文档上传、删除、重新处理；入库流水线（PDF 解析、切分、Embedding）
 │   ├── storage                 文件存储（本地实现）与孤儿文件对账
 │   ├── task                    通用异步任务：扫描、领取、租约、fencing、重试
+│   ├── retrieval               带权限过滤的向量检索、检索调试接口
+│   ├── chat                    会话与消息、KB_QA 流程（SSE）、引用解析、提示词、超时收尾
+│   ├── observability           脱敏（SensitiveDataMasker、Logback 转换器）、模型调用日志、日志查询与清理
 │   └── system/web              冒烟接口
 ├── src/main/resources
 │   ├── application.yml
 │   ├── application-local.yml   本地开发 profile（读取 .env，创建演示账号）
+│   ├── logback-spring.xml      应用日志脱敏（消息和异常堆栈）
 │   └── db/migration/V1__init.sql
 ├── src/test/java/...           单元测试、接口切片测试、ArchUnit、集成测试
 ├── http/                       手动测试脚本（IntelliJ HTTP Client）和示例 PDF

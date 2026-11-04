@@ -3,7 +3,9 @@ package com.example.kbagent.support;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +25,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * 只用于验证 SQL、流程和一致性，不用于评估语义检索质量。
  * <p>
  * 可以注入故障：让接下来的若干次调用失败、让每次调用阻塞一段时间、或者卡住直到测试放行。
+ * 也可以为指定文本预设向量（{@link #alias}），精确控制检索结果。
  * 所有集成测试共用一个实例，每个测试结束后调用 {@link #reset()}。
  */
 public class FakeEmbeddingModel implements EmbeddingModel {
@@ -34,6 +37,7 @@ public class FakeEmbeddingModel implements EmbeddingModel {
     private final Semaphore callsStarted = new Semaphore(0);
     private volatile Duration delayPerCall = Duration.ZERO;
     private volatile CountDownLatch gate;
+    private final Map<String, List<String>> aliases = new ConcurrentHashMap<>();
 
     public FakeEmbeddingModel(int dimensions) {
         this.dimensions = dimensions;
@@ -69,6 +73,14 @@ public class FakeEmbeddingModel implements EmbeddingModel {
         return calls.get();
     }
 
+    /**
+     * 让 text 的向量等于 targets 各自向量之和（归一化）。哈希生成的高维向量近似正交，
+     * 所以 text 与每个 target 的余弦相似度约为 1/√n（1 个 target 时为 1，3 个时约 0.58），与其他文本约为 0。
+     */
+    public void alias(String text, String... targets) {
+        aliases.put(text, List.of(targets));
+    }
+
     /** 是否有调用发生在数据库事务中（ADR-05 不允许）。 */
     public boolean calledInsideTransaction() {
         return calledInsideTransaction.get();
@@ -81,6 +93,7 @@ public class FakeEmbeddingModel implements EmbeddingModel {
         calledInsideTransaction.set(false);
         callsStarted.drainPermits();
         delayPerCall = Duration.ZERO;
+        aliases.clear();
     }
 
     @Override
@@ -127,17 +140,38 @@ public class FakeEmbeddingModel implements EmbeddingModel {
         }
     }
 
-    /** 由文本决定的单位向量。 */
+    /** 由文本决定的单位向量；设置了 alias 时是各 target 向量之和（归一化）。 */
     public float[] vectorFor(String text) {
+        List<String> targets = aliases.get(text);
+        if (targets == null) {
+            return hashVector(text);
+        }
+        float[] sum = new float[dimensions];
+        for (String target : targets) {
+            float[] v = hashVector(target);
+            for (int i = 0; i < dimensions; i++) {
+                sum[i] += v[i];
+            }
+        }
+        return normalize(sum);
+    }
+
+    private float[] hashVector(String text) {
         Random random = new Random(text.hashCode());
         float[] vector = new float[dimensions];
-        double norm = 0;
         for (int i = 0; i < dimensions; i++) {
             vector[i] = (float) random.nextGaussian();
-            norm += vector[i] * vector[i];
+        }
+        return normalize(vector);
+    }
+
+    private static float[] normalize(float[] vector) {
+        double norm = 0;
+        for (float v : vector) {
+            norm += v * v;
         }
         float scale = (float) (1 / Math.sqrt(norm));
-        for (int i = 0; i < dimensions; i++) {
+        for (int i = 0; i < vector.length; i++) {
             vector[i] *= scale;
         }
         return vector;

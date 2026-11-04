@@ -1,5 +1,6 @@
 package com.example.kbagent.knowledge.service;
 
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -50,6 +51,15 @@ public class KbPermissionService {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         return new Granted(kb, access);
+    }
+
+    /**
+     * 当前用户至少有 READ 权限的全部知识库（§3.3：接口鉴权和检索过滤共用同一套规则）。
+     * 与 {@link #accessOf} 的规则一致：ADMIN 全部；其他人是自己拥有的、公开的、自己是成员的。
+     */
+    @Transactional(readOnly = true)
+    public List<Long> accessibleKbIds(Actor actor) {
+        return actor.isAdmin() ? knowledgeBases.findAllIds() : knowledgeBases.findAccessibleIds(actor.userId());
     }
 
     /** 当前用户在各个知识库中的成员权限，key 为知识库 ID。 */

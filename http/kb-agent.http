@@ -2,7 +2,7 @@
 #
 # 准备：
 #   1. docker compose up -d，并用运行配置“KbAgentApplication (local)”启动后端
-#   2. 文档入库需要调用通义 Embedding：在 .env 中填写 AI_API_KEY
+#   2. 文档入库（Embedding）和问答（qwen-plus）都要调用通义：在 .env 中填写 AI_API_KEY
 #   3. 在本目录创建 http-client.private.env.json（已被 .gitignore 忽略）：
 #        { "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }
 # 使用：编辑器右上角的环境选 local，然后从上到下依次点击每个请求左侧的 ▶。
@@ -84,7 +84,57 @@ Content-Type: application/json
 
 {"permission": "READER"}
 
-### 12. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
+### 12. 检索调试（M3）：只检索、不生成回答。看每个片段的相似度，以及是否达到问答使用的阈值（aboveThreshold）
+POST {{baseUrl}}/api/v1/knowledge-bases/{{kbId}}/search
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"query": "出差回来后，报销最晚什么时候提交？", "topK": 5}
+
+### 13. 创建问答会话：绑定知识库；不传 kbId 时在当前用户有权访问的全部知识库中检索
+POST {{baseUrl}}/api/v1/conversations
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"mode": "KB_QA", "kbId": {{kbId}}}
+
+> {% client.global.set("convId", response.body.data.id); %}
+
+### 14. 流式提问（SSE）：依次收到 meta → retrieval → delta… → citations → done；回答中的 [n] 对应 citations 里的页码
+POST {{baseUrl}}/api/v1/conversations/{{convId}}/messages/stream
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+Accept: text/event-stream
+
+{"content": "出差回来后，报销最晚什么时候提交？"}
+
+### 15. 非流式提问：一次返回完整结果（引用、检索结果、用量和耗时）；会带上一轮的问答作为历史
+POST {{baseUrl}}/api/v1/conversations/{{convId}}/messages
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"content": "一线城市的住宿标准是多少？"}
+
+### 16. 知识库里没有的内容：直接拒答，不调用模型（retrieval 为空，citations.mode 为 NONE，usage 为 null）
+POST {{baseUrl}}/api/v1/conversations/{{convId}}/messages
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"content": "公司今年的年会在哪里举办？"}
+
+### 17. 历史消息：游标分页，items 按时间正序；把返回的 nextBeforeId 作为 beforeId 传入可以继续向前加载
+GET {{baseUrl}}/api/v1/conversations/{{convId}}/messages?size=20
+Authorization: Bearer {{adminToken}}
+
+### 18. 会话列表：按更新时间倒序，标题默认取第一个问题（可以加 &keyword=报销 按标题搜索）
+GET {{baseUrl}}/api/v1/conversations?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 19. 模型调用日志（只有管理员能看）：问题已脱敏、只保留前 200 字和 SHA-256；可以加 &traceId=… 过滤
+GET {{baseUrl}}/api/v1/admin/logs/llm-calls?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 20. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
 POST {{baseUrl}}/api/v1/auth/refresh
 Content-Type: application/json
 
@@ -95,15 +145,15 @@ Content-Type: application/json
     client.global.set("adminRefresh", response.body.data.refreshToken);
 %}
 
-### 13. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
+### 21. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
 DELETE {{baseUrl}}/api/v1/documents/{{docId}}
 Authorization: Bearer {{adminToken}}
 
-### 14. 用户列表（管理员）
+### 22. 用户列表（管理员）
 GET {{baseUrl}}/api/v1/admin/users?page=1&size=20
 Authorization: Bearer {{adminToken}}
 
-### 15. 登出：之后用旧 token 执行 2 会返回 401
+### 23. 登出：之后用旧 token 执行 2 会返回 401
 POST {{baseUrl}}/api/v1/auth/logout
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json

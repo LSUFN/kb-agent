@@ -6,6 +6,7 @@ import com.example.kbagent.common.api.ApiResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
@@ -46,6 +47,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Object>> handleRateLimited(RateLimitedException ex) {
         return ResponseEntity.status(ex.errorCode().httpStatus())
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.retryAfterSeconds()))
+                .contentType(MediaType.APPLICATION_JSON)
                 .body(ApiResponse.error(ex.errorCode(), ex.getMessage(), null));
     }
 
@@ -114,7 +116,13 @@ public class GlobalExceptionHandler {
         return build(ErrorCode.INTERNAL_ERROR, null, null);
     }
 
+    /**
+     * 显式指定 JSON：SSE 接口的请求头是 Accept: text/event-stream，如果按 Accept 协商，
+     * 开始输出之前的错误（404、429 等）会因为没有匹配的转换器而丢失响应体。
+     */
     private static ResponseEntity<ApiResponse<Object>> build(ErrorCode code, String message, Object details) {
-        return ResponseEntity.status(code.httpStatus()).body(ApiResponse.error(code, message, details));
+        return ResponseEntity.status(code.httpStatus())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiResponse.error(code, message, details));
     }
 }

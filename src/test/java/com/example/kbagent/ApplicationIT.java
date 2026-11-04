@@ -10,6 +10,9 @@ import java.util.List;
 
 import com.example.kbagent.support.TestcontainersConfiguration;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.model.chat.client.autoconfigure.ChatClientBuilderProperties;
+import org.springframework.ai.model.chat.observation.autoconfigure.ChatObservationProperties;
+import org.springframework.ai.model.tool.autoconfigure.ToolCallingProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -35,6 +38,15 @@ class ApplicationIT {
 
     @Autowired
     JdbcTemplate jdbc;
+
+    @Autowired
+    ChatClientBuilderProperties chatClientProperties;
+
+    @Autowired
+    ChatObservationProperties chatObservationProperties;
+
+    @Autowired
+    ToolCallingProperties toolCallingProperties;
 
     private final HttpClient http = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -111,5 +123,19 @@ class ApplicationIT {
         assertThat(response.body())
                 .contains("\"code\":\"UNAUTHORIZED\"")
                 .contains("\"traceId\":\"" + traceId + "\"");
+    }
+
+    /**
+     * §4.6：Spring AI 自带的 observation 不记录 Prompt、回答和工具内容。
+     * 断言的是框架实际绑定的配置对象，升级后即使默认值变化，application.yml 中显式的 false 也必须生效。
+     */
+    @Test
+    void springAiObservationsDoNotRecordContent() {
+        assertThat(chatClientProperties.getObservations().isLogPrompt()).isFalse();
+        assertThat(chatClientProperties.getObservations().isLogCompletion()).isFalse();
+        assertThat(chatObservationProperties.isLogPrompt()).isFalse();
+        assertThat(chatObservationProperties.isLogCompletion()).isFalse();
+        assertThat(chatObservationProperties.isIncludeErrorLogging()).isFalse();
+        assertThat(toolCallingProperties.getObservations().isIncludeContent()).isFalse();
     }
 }

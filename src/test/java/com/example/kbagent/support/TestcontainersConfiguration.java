@@ -16,7 +16,8 @@ import org.testcontainers.utility.DockerImageName;
  * <ul>
  *   <li>容器：与 docker-compose.yml 使用同一镜像，保证 Flyway 脚本在真实的 pgvector 上执行；
  *       通过 @ServiceConnection 自动覆盖数据源与 Redis 连接配置</li>
- *   <li>FakeEmbeddingModel：test profile 关闭了真实的模型客户端，集成测试不需要 API Key</li>
+ *   <li>FakeEmbeddingModel、FakeChatModel：test profile 关闭了真实的模型客户端，集成测试不需要 API Key；
+ *       ChatClient.Builder 由 Spring AI 自动配置基于 FakeChatModel 创建</li>
  * </ul>
  */
 @TestConfiguration(proxyBeanMethods = false)
@@ -25,6 +26,11 @@ public class TestcontainersConfiguration {
     @Bean
     FakeEmbeddingModel fakeEmbeddingModel() {
         return new FakeEmbeddingModel(1024);
+    }
+
+    @Bean
+    FakeChatModel fakeChatModel() {
+        return new FakeChatModel();
     }
 
     /**

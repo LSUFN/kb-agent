@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.4（2026-11-04）· **状态：M0、M1、M2 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1、M2 的验收标准已验证（§4.8、§4.9）。M3 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.5（2026-11-05）· **状态：M0–M3 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M3 的验收标准已验证（§4.8–§4.10）。M4 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.5 变更：M3 落地，新增 §4.10。包括：用真实模型校准检索阈值（保持 0.5）；按实测改进引用提示词（合法引用从 6/15 提高到 15/15）；异常堆栈也要脱敏；SSE 响应显式声明 UTF-8；新增 `GET /conversations/{id}`；AGENT 会话在 M4 之前返回 400。
 > v0.2.4 变更：M2 落地，新增 §4.9 记录实现细节和设计调整，包括：PDF 解析改为直接使用 PDFBox；`GET /knowledge-bases/{kbId}` 对 READ 级别开放；只有清空了文档的知识库才能删除。
 > v0.2.3 变更：M1 落地，新增 §4.8 认证与会话的实现细节和 ADR-13、ADR-14；演示账号改为启动时初始化，不再使用 Flyway V3（§5）；分页参数 `page` 从 1 开始（§6.1）。
 > v0.2.2 变更：回填 Spike 结论（§2.2）；版本锁定为 Boot 4.1.2 + Spring AI 2.0.2；通义 base-url 必须以 `/v1` 结尾；Embedding 批大小定为 10；确认 observation 内容记录的属性名（§4.6）；§4.4 的异常终止方案经 S4 验证，保持 L0。
@@ -480,6 +481,61 @@ chatClient.prompt()
 - 得到 186 个 chunk，覆盖 53 页（另 1 页没有可提取的文本）。
 - chunk 长度在 82 到 500 字之间，平均 396 字。
 
+### 4.10 知识库问答与会话（M3 实现）
+
+§4.3（对话链路的事务边界）、§4.5（层次 A）、§4.6、§6.3、§6.4 的设计已落地。下面记录实现细节、实测数据和与原设计不一致的地方。
+
+**模块与依赖方向**：`chat → retrieval → knowledge`，`chat / retrieval → observability`。`retrieval` 只负责“问题向量化 + 带权限过滤的向量检索”，问答流程、提示词、引用和消息状态都在 `chat`。`observability`（脱敏、调用日志）不依赖任何业务模块。
+
+**一轮问答的执行过程**（`KbQaService`，本类不开事务）：
+1. 在请求线程上同步完成：限流（Redis 令牌桶，键 `chat:{userId}`）→ 短事务 1（`ChatTransactions.begin`：校验会话归属和知识库权限、读取最近 3 轮成功的历史、保存问题和 STREAMING 占位、用第一个问题生成标题）。这些步骤失败时什么都没有写入，接口返回普通的 4xx。
+2. 返回冷的 Flux，订阅后：推送 `meta` → 在 `boundedElastic` 上检索 → 推送 `retrieval` → 没有达到阈值的片段时直接拒答（不调用模型，`citation_mode = NONE`），否则流式调用模型、逐段推送 `delta`。
+3. 模型输出结束后解析引用，写入调用日志，再执行短事务 2，最后推送 `citations` 和 `done`。所以客户端收到 `done` 时数据库已经是最终状态。
+4. 三种结束方式（完成、失败、订阅被取消）用一个 `AtomicBoolean` 保证只有一个能执行短事务 2；短事务 2 先 `SELECT … FOR UPDATE` 锁住消息，只处理仍为 STREAMING 的消息，与超时扫描器互斥。
+5. 订阅被取消（客户端断开、停止生成）时，上游的模型请求随之取消，已生成的部分以 INTERRUPTED 保存（`error_code = CLIENT_CLOSED`）。这一步放到 `boundedElastic` 上执行，不占用触发取消的容器线程。超过 10 分钟仍为 STREAMING 的消息由扫描器改为 INTERRUPTED（`STREAM_TIMEOUT`），这个时间大于 `spring.mvc.async.request-timeout`（5 分钟），不会误伤正在输出的回答。
+
+**SSE 的细节**：
+- 心跳用 `publish` 把事件流分成两路：一路原样输出，另一路决定 `Flux.interval` 心跳何时停止（事件流结束，心跳也结束）。心跳除了防止代理断开空闲连接，也让服务端在等待首字期间就能发现客户端已断开。
+- 响应头显式写成 `text/event-stream;charset=UTF-8`。SSE 规范要求按 UTF-8 解码，但不带 charset 时，MockMvc 和 IntelliJ HTTP Client 会按 ISO-8859-1 显示，中文变成乱码。
+- 开始输出之前的错误（404、429 等）按普通 JSON 返回。为此全局异常处理显式设置 `Content-Type: application/json`：如果按请求头 `Accept: text/event-stream` 协商，找不到能写 JSON 的转换器，响应体会丢失。
+- 开始输出之后的失败不抛异常，统一转换为 `error` 事件。
+
+**检索阈值的校准**（text-embedding-v3，2026-11-05 实测，`/knowledge-bases/{kbId}/search`）：用示例差旅制度（中文，3 页）和 M2 验收用的 54 页英文文档，各准备了相关和无关的问题，比较 top-1 相似度：
+
+| 问题类型 | 数量 | top-1 相似度 |
+|---|---|---|
+| 相关问题（12 个中 top-1 都是答案所在的页） | 12 | 0.579 – 0.767 |
+| 与文档领域无关（天气、编程、地理、年会；在英文文档上问报销） | 9 | 0.347 – 0.488 |
+| 同一领域但文档没有覆盖（在差旅制度上问年假、绩效、入职） | 3 | 0.55 – 0.605 |
+
+阈值保持 0.5（`APP_RETRIEVAL_MIN_SCORE`）：所有相关问题都能通过；领域外的问题全部直接拒答，不调用模型。同一领域但没有覆盖的问题会越过阈值，这类问题靠提示词处理：模型回答“根据现有资料无法回答”，实测的年假问题就是这样。阈值只能判断“像不像”，判断不了“能不能回答”。如果把阈值提高到 0.6，会把相关问题误拒（最低 0.579）。样本量还小，P1 的离线评测会扩大样本（§4.5 层次 B）。
+
+**引用（§4.5 层次 A 的实现）**：
+- `CitationParser` 是纯函数，支持 `[1]`、`[1][2]`、`[1,2]`、`[1，2]`、`[2、3]`、`【1】`、`［1］`；编号 0、负数、越界的进入 `invalidIndices`；去重并按编号排序；围栏代码块和行内代码里的 `[n]` 不解析，没闭合的代码块一直算到结尾（输出被中断时会出现）。
+- 引用模式：至少有一个合法引用时为 NORMAL，`citations` 是被引用的片段；检索到了资料但回答没有合法引用时为 FALLBACK，`citations` 是本轮检索到的全部片段，前端作为“参考资料”展示；拒答时为 NONE。
+- 历史回答带给模型之前会去掉 `[n]`：它们指向当时那一轮的检索结果，和本轮的编号会混淆。
+
+**提示词按实测修改**：第一版提示词在示例差旅制度上实测时，qwen-plus 经常把原文的“第九条”写成 `[9]`。解析器能识别出它越界（层次 A 保证不会映射到错误的文档），但这样的回答就没有可用的引用了。修改了两处：System Prompt 中加入正反例（“资料 [2] 的原文是第九条……应标注 [2]，而不是 [9]”）；在用户消息的末尾、问题之后，再重复一次引用要求，因为模型对提示词末尾的内容最敏感。用 5 个问题各问 3 次（含一个多轮追问）做对比：合法引用（NORMAL）从 **6/15** 提高到 **15/15**，答案内容都正确。同时规定“无法回答时不要标注编号”，否则模型会给拒答也标上引用。
+
+**用量和耗时**：用量取流式响应最后一个分片（通义兼容模式下实测一直返回，S2）；没有返回时按“1.5 个字符约 1 个 token”估算，并标记 `estimated = true`。`done` 事件里的 `latencyMs` 和 `firstTokenMs` 从请求开始计算（用户感受到的时间）；`llm_call_log` 里的 `first_token_ms` 和 `latency_ms` 从模型调用开始计算（模型本身的性能）。
+
+**脱敏（§4.6 的补充）**：
+- 只对日志消息（`%m`）脱敏是不够的。集成测试发现：流式调用失败时，Spring AI 的 `MessageAggregator` 会以 ERROR 级别打印“Aggregation Error”和完整的异常堆栈，而上游报错可能回显请求内容。所以 `logback-spring.xml` 中也覆盖了 Spring Boot 的 `%wEx` / `%wex`，异常堆栈（包括各级 Caused by）同样经过 `SensitiveDataMasker`。
+- 本项目自己打印上游异常时，只输出异常类型和（脱敏后的）消息，不打印堆栈。
+- 用户问题在 `llm_call_log` 中只保存脱敏后的前 200 字和 SHA-256；System Prompt、检索片段和完整回答都不记录，只记录输出字数。
+- Spring AI observation 的 6 个内容开关在 `application.yml` 中显式设为 false，`ApplicationIT` 断言的是框架实际绑定的配置对象。
+
+**接口上的调整**：
+- 新增 `GET /conversations/{id}`（本人），前端恢复会话时需要知道它绑定的知识库。
+- AGENT 会话在 M4 之前不能创建，返回 400（原设计是所有角色都可以创建，M4 实现工具后恢复）。
+- 消息的游标分页返回 `{items, nextBeforeId}`：`items` 按时间正序，`nextBeforeId` 为 null 表示没有更早的消息。
+- 会话绑定的知识库被删除后 `kb_id` 变为 null（`ON DELETE SET NULL`），之后在用户有权访问的全部知识库中检索。只有清空了文档的知识库才能删除（§4.9），所以不会悄悄换掉有内容的资料来源。
+
+**验收结果（2026-11-05）**：§8 的四项都已通过集成测试（见 README 的 M3 验收清单）。真实模型（qwen-plus + text-embedding-v3）的端到端检查：
+- 首字时间（从请求开始算）：12 次调用中 11 次在 0.4–0.9 秒，1 次 1.7 秒。英文长回答（210–323 个 token）5.1–7.6 秒完成。
+- 领域外的问题 0.13–0.23 秒拒答，没有 Chat 调用记录。
+- 用户在第 5 个 delta 后断开，0.3 秒内消息变为 INTERRUPTED，保存了已生成的 140 个字。调用日志记录为 `CLIENT_CLOSED`，耗时 0.8 秒（完整回答需要约 6 秒），说明上游请求确实被中止了。
+
 ---
 
 ## 5. 数据库表设计
@@ -732,10 +788,11 @@ CREATE INDEX idx_anomaly_time_type ON biz_anomaly_event(occurred_at, event_type)
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/conversations` | 登录 | `{mode: KB_QA\|AGENT, kbId?}`。所有角色都可以创建 AGENT 会话，**可用的工具由角色决定**（§4.4.3） |
+| POST | `/conversations` | 登录 | `{mode: KB_QA\|AGENT, kbId?, title?}`。所有角色都可以创建 AGENT 会话，**可用的工具由角色决定**（§4.4.3）；M4 之前创建 AGENT 会话返回 400 |
 | GET | `/conversations?keyword=&page=` | 本人 | 按更新时间倒序 |
+| GET | `/conversations/{id}` | 本人 | 会话详情（M3 新增） |
 | PATCH / DELETE | `/conversations/{id}` | 本人 | 重命名、软删除 |
-| GET | `/conversations/{id}/messages?beforeId=&size=` | 本人 | 游标分页，包含引用和工具步骤 |
+| GET | `/conversations/{id}/messages?beforeId=&size=` | 本人 | 游标分页，返回 `{items, nextBeforeId}`，items 按时间正序；包含引用（M4 起包含工具步骤） |
 | POST | `/conversations/{id}/messages/stream` | 本人 | **主入口**，返回 `text/event-stream`，请求体 `{content}` |
 | POST | `/conversations/{id}/messages` | 本人 | 非流式版本，返回完整结果，供脚本和集成测试使用 |
 
@@ -809,7 +866,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | **M0 骨架 + Spike** ✅ 2026-11-04 完成 | 锁定版本；Maven 工程和包结构；Compose（postgres + redis）；Flyway V1；统一响应和异常；TraceId；Actuator；ArchUnit；`.env.example`；完成 Spike S1–S5 并把结论写回 §2.2 | `docker compose up -d` 后 health 返回 UP；`mvn verify` 在没有 Key 的情况下通过；仓库中没有密钥；§2.2 的 5 项都有明确结论和选定的退路 |
 | **M1 认证与权限** ✅ 2026-11-04 完成 | 用户、JWT、Refresh Token 轮换、登出黑名单、角色、区域范围、限流、`/admin/users` | 三种角色可以登录；401/403/404 的语义符合约定；登出后旧 Token 失效；账号停用后立即失效 |
 | **M2 知识库与入库** ✅ 2026-11-04 完成 | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
-| **M3 KB_QA 与会话** | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
+| **M3 KB_QA 与会话** ✅ 2026-11-05 完成 | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
 | **M4 Agent 与工具** | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
 | **M5 前端** | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
 | **M6 部署与文档** | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
