@@ -80,6 +80,16 @@ $login = Invoke-RestMethod -Method Post http://localhost:8080/api/v1/auth/login 
 Invoke-RestMethod http://localhost:8080/api/v1/users/me -Headers @{ Authorization = "Bearer $($login.data.accessToken)" }
 ```
 
+### 在 IntelliJ IDEA 中运行
+
+使用项目自带的运行配置 **KbAgentApplication (local)**（位于 `.run/`，IntelliJ 会自动识别），它已经激活了 `local` profile。如果直接点 `main` 方法旁边的运行按钮，IntelliJ 生成的配置不带 profile，`.env` 不会被读取，启动时会报：
+
+```
+The server requested SCRAM-based authentication, but no password was provided.
+```
+
+这时在 Run → Edit Configurations 中把 Active profiles 设为 `local` 即可。`.env` 只在 local profile 下导入，这样测试不会读到本地配置。
+
 ### 常见问题：Windows 上容器端口绑定失败
 
 **现象**：`docker compose up -d` 报错 `ports are not available ... bind: An attempt was made to access a socket in a way forbidden by its access permissions`，容器一直停在 `Created` 状态。
