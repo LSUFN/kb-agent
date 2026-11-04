@@ -15,12 +15,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
 
 /**
  * M0 集成测试（需要 Docker）：容器启动 → Flyway 建表 → 应用上下文可用 → 健康检查与统一响应正常。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
+@ActiveProfiles("test")
 class ApplicationIT {
 
     private static final List<String> EXPECTED_TABLES = List.of(
@@ -101,9 +103,13 @@ class ApplicationIT {
     }
 
     @Test
-    void unknownPathReturnsUnifiedNotFound() throws Exception {
+    void anonymousRequestToProtectedPathIsUnified401() throws Exception {
+        // M1 起所有 /api/** 默认需要登录；已登录访问不存在的路径返回 404，见 AuthFlowIT
         HttpResponse<String> response = get("/api/v1/does-not-exist");
-        assertThat(response.statusCode()).isEqualTo(404);
-        assertThat(response.body()).contains("\"code\":\"NOT_FOUND\"");
+        assertThat(response.statusCode()).isEqualTo(401);
+        String traceId = response.headers().firstValue("X-Trace-Id").orElseThrow();
+        assertThat(response.body())
+                .contains("\"code\":\"UNAUTHORIZED\"")
+                .contains("\"traceId\":\"" + traceId + "\"");
     }
 }

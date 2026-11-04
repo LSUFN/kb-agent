@@ -4,3 +4,8 @@
 spring:
   config:
     import: "optional:file:.env[.properties]"
+
+app:
+  demo:
+    # 本地开发自动创建演示账号，密码取 .env 中的 DEMO_USER_PASSWORD
+    seed-users: true

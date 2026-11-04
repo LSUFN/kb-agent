@@ -2,6 +2,7 @@ package com.example.kbagent.architecture;
 
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
+import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
 import java.util.Set;
 
@@ -79,6 +80,22 @@ class ArchitectureTest {
                 .allowEmptyShould(true)
                 .because("Agent 层通过 Service / Tool 访问数据");
         rule.check(classes);
+    }
+
+    @Test
+    void userModuleMustNotDependOnSecurityModule() {
+        ArchRule rule = noClasses().that().resideInAPackage(ROOT + ".user..")
+                .should().dependOnClassesThat().resideInAPackage(ROOT + ".security..")
+                .because("用户模块不感知认证机制（JWT、Redis 中的令牌）；依赖方向只能是 security → user");
+        rule.check(classes);
+    }
+
+    @Test
+    void topLevelModulesMustBeFreeOfCycles() {
+        slices().matching(ROOT + ".(*)..")
+                .should().beFreeOfCycles()
+                .because("模块之间的循环依赖会让按功能分包失去意义（ADR-01）")
+                .check(classes);
     }
 
     @Test

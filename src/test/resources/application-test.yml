@@ -1,0 +1,8 @@
+# 测试 profile：所有 Spring 测试都通过 @ActiveProfiles("test") 激活。
+app:
+  security:
+    jwt:
+      # 仅用于测试的固定密钥，不要用于任何真实环境
+      secret: test-only-jwt-secret-do-not-use-in-any-real-environment
+    # 集成测试共用同一个客户端 IP，调高登录限流避免用例之间相互影响；限流行为由 RedisRateLimiterIT 单独验证
+    login-rate-limit-per-minute: 10000

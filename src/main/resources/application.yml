@@ -44,7 +44,7 @@ management:
   endpoints:
     web:
       exposure:
-        # prometheus 在 M1 接入 Spring Security 后限制为仅内网 / ADMIN 访问
+        # health 公开；info、prometheus 只对 ADMIN 开放（SecurityConfig）
         include: health,info,prometheus
   endpoint:
     health:
@@ -53,3 +53,19 @@ management:
 logging:
   pattern:
     level: "%5p [%X{traceId:-}]"
+
+app:
+  security:
+    jwt:
+      # HS256 签名密钥，至少 32 字节；只能通过环境变量注入，未设置时拒绝启动
+      secret: ${JWT_SECRET:}
+      issuer: kb-agent
+    access-token-ttl: 15m
+    refresh-token-ttl: 7d
+    # 用户状态缓存；管理员修改用户后会立即清除对应条目
+    actor-cache-ttl: 30s
+    login-rate-limit-per-minute: ${APP_LOGIN_RATE_LIMIT_PER_MINUTE:10}
+  demo:
+    # 启动时创建 admin / analyst / user 三个演示账号；只在账号不存在时创建，不覆盖已有密码
+    seed-users: false
+    password: ${DEMO_USER_PASSWORD:}

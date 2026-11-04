@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.2（2026-11-04）· **状态：M0 已完成。** 工程骨架已编译，`mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2。M1 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.3（2026-11-04）· **状态：M0、M1 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1 的验收标准已由集成测试验证（§4.8）。M2 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.3 变更：M1 落地，新增 §4.8 认证与会话的实现细节和 ADR-13、ADR-14；演示账号改为启动时初始化，不再使用 Flyway V3（§5）；分页参数 `page` 从 1 开始（§6.1）。
 > v0.2.2 变更：回填 Spike 结论（§2.2）；版本锁定为 Boot 4.1.2 + Spring AI 2.0.2；通义 base-url 必须以 `/v1` 结尾；Embedding 批大小定为 10；确认 observation 内容记录的属性名（§4.6）；§4.4 的异常终止方案经 S4 验证，保持 L0。
 > v0.2.1 变更：Embedding 批大小改为由 S3 实测确定（默认不超过 10 条）；M0 的 Spike 代码位于 `spikes/`。
 > 定位：Java 后端工程实践作品。重点在分层设计、数据一致性、权限边界、安全、可观测性和可测试性。
@@ -184,7 +185,7 @@ com.example.kbagent
 
 | 模块 | 职责 | 关键约束 |
 |---|---|---|
-| security / user | Access Token 有效期 15 分钟，Refresh Token 7 天并在 Redis 中轮换；登出时把 jti 加入黑名单；每次请求从数据库重新加载用户状态（短 TTL 缓存），已停用的账号会立即失效 | 角色和区域范围以服务端数据库为准，不信任 Token 之外的任何来源 |
+| security / user | Access Token 有效期 15 分钟，Refresh Token 7 天并在 Redis 中轮换；登出时把 jti 加入黑名单；每次请求从数据库重新加载用户状态（短 TTL 缓存），已停用的账号会立即失效（实现见 §4.8） | 角色和区域范围以服务端数据库为准，Token 只用来确认身份；依赖方向只能是 security → user（ArchUnit 约束） |
 | knowledge | 知识库增删改查、成员管理（READER/EDITOR）；计算当前用户可访问的知识库集合 | 接口鉴权和检索过滤共用同一个方法 |
 | storage | `StorageService` 提供 `writeTemp / promote / delete / exists / list` 操作；对账任务 | 删除操作是幂等的：文件不存在也视为成功 |
 | document | 校验上传（≤20MB、文件头 `%PDF`）；计算 SHA-256 去重；上传和删除流程（§4.1）；切分器 | |
@@ -403,8 +404,46 @@ chatClient.prompt()
 
 - **切分器** `SentenceAwareTextSplitter`：优先在 `\n\n`、`。！？；`、`\n` 处断开；目标长度约 500 字，相邻 chunk 重叠 80 字；不跨页；保留页码。是纯函数，单元测试最完整。
 - **自建 `doc_chunk` 表**：权限过滤就是普通的 SQL 列（`kb_id`）条件，文档删除时 chunk 级联删除。为了避免过滤后凑不满 Top-K，在检索事务内执行 `SET LOCAL hnsw.iterative_scan = relaxed_order`，并调整 `hnsw.ef_search`。
-- **限流**：Redis 令牌桶，每个用户每分钟 20 次对话，超出返回 429。
+- **限流**：Redis 令牌桶，每个用户每分钟 20 次对话，超出返回 429。令牌桶已在 M1 实现（`RedisRateLimiter`，见 §4.8），M3 直接复用。
 - **重试和超时**：2.0 的 OpenAI 模块由 OpenAI SDK 自己负责超时和重试，配置项是 `spring.ai.openai.timeout` 和 `spring.ai.openai.max-retries`（可以按 chat / embedding 分别覆盖）。流式输出开始之后不再重试，失败就推送 `error` 事件，并把消息标记为 FAILED。
+
+### 4.8 认证与会话（M1 实现）
+
+**Access Token**（HS256 JWT，15 分钟）：只携带 `iss`、`sub`（用户 ID）、`jti`、`iat`、`exp`，**不携带角色**。每个请求的处理过程：
+1. `NimbusJwtDecoder` 校验签名、有效期（允许 60 秒时钟偏差）和签发者；`ActiveTokenValidator` 要求带 `exp` 和 `jti`（框架的时间戳校验在缺少 `exp` 时会放行），并且 `jti` 不在登出黑名单里。
+2. `ActorAuthenticationConverter` 按 `sub` 从 `ActorCache` 取出 `Actor`（id、用户名、角色、区域范围）。账号已停用或不存在时返回 401 `ACCOUNT_DISABLED`。
+3. Controller 通过 `@AuthenticationPrincipal Actor` 拿到当前用户。
+
+**用户状态缓存**：`ActorCache` 是 Caffeine 本地缓存，TTL 30 秒。管理员修改用户后发布 `UserAccountChangedEvent`，缓存在**事务提交之后**清除对应条目。如果在提交前清除，并发请求可能把尚未提交的旧状态重新读进缓存。所以停用账号、修改角色都会立即生效，不需要等 Token 过期，也不需要等缓存过期（`AuthFlowIT` 验证）。单实例部署用本地缓存就够了；以后多实例部署时，需要把清除操作广播到所有实例（例如 Redis pub/sub）。
+
+**Refresh Token**（7 天，每次刷新重新计时）：32 字节随机串（Base64URL），Redis 中只保存它的 SHA-256。
+
+| 键 | 值 | 用途 |
+|---|---|---|
+| `auth:rt:{hash}` | `userId:familyId` | 当前有效的令牌 |
+| `auth:rt:used:{hash}` | `userId:familyId` | 已轮换掉的旧令牌，保留到它原本的过期时间，用于重用检测 |
+| `auth:rt:family:{familyId}` | 当前有效令牌的 hash | 一次登录产生一个令牌族，用于整族撤销 |
+| `auth:bl:{jti}` | `1` | 登出黑名单，TTL = Token 剩余有效期 + 60 秒时钟偏差 |
+| `rl:{key}` | 令牌桶状态 | 限流 |
+
+- **轮换**：刷新时用一个 Lua 脚本原子地完成“删除当前令牌并留下已使用标记”，然后在同一令牌族内签发新令牌。刷新时直接查库确认账号仍然有效，不走缓存。
+- **重用检测**：已轮换掉的旧令牌再次出现，说明它可能被窃取。这时撤销整个令牌族，攻击者和合法用户都需要重新登录。已签发的 Access Token 最多再有效 15 分钟（可以接受的代价）。**前端必须串行刷新**（同一时刻只发一个刷新请求，其他请求等待结果），否则多个标签页并发刷新会被误判为重用（§9）。
+- **登出**：当前 Access Token 的 `jti` 进入黑名单；请求体带了 `refreshToken` 时，撤销它所在的令牌族（只能撤销属于自己的令牌）。
+
+**登录**：
+- 按客户端 IP 限流，默认每分钟 10 次（令牌桶由 Lua 脚本原子执行，时间取 Redis 服务器的 `TIME`），超出返回 429 和 `Retry-After`。M6 部署在 Nginx 之后时，要配置 `server.forward-headers-strategy`，才能拿到真实的客户端 IP。
+- 用户名不区分大小写，保存为小写。
+- 用户不存在时也做一次 BCrypt 比对，使响应时间与“口令错误”一致，防止枚举用户名。
+- 口令超过 72 字节直接判为错误（BCrypt 只处理前 72 字节，超长输入会抛异常）。
+- 只有口令正确时，才会提示“账号已停用”。
+
+**其他约定**：
+- 认证失败的响应由 `RestAuthenticationEntryPoint` / `RestAccessDeniedHandler` 输出统一响应体。`TraceIdFilter` 排在安全过滤链之前，所以 401/403 同样带 traceId。
+- 方法级鉴权（`@PreAuthorize`）失败时，异常从 Controller 抛出，由 `GlobalExceptionHandler` 映射为 403。如果不显式处理，它会被兜底的 `Exception` 处理器变成 500。
+- 管理员不能停用自己，也不能修改自己的角色（409），保证系统里始终至少有一个可用的 ADMIN。
+- 只有 ANALYST 有区域范围，而且至少要有一个区域；角色改为 USER/ADMIN 时自动清空区域。这条不变式由 `SysUser` 实体保证，所有修改路径都要经过它。
+- `/actuator/health` 公开；`/actuator/prometheus` 等其余端点只对 ADMIN 开放。
+- 模块依赖方向：`security → user`，`user` 不感知 JWT 和 Redis 中的令牌。用 ArchUnit 约束，同时约束顶层模块之间没有循环依赖。
 
 ---
 
@@ -413,7 +452,7 @@ chatClient.prompt()
 所有 ID 使用 `BIGINT GENERATED ALWAYS AS IDENTITY`，时间使用 `TIMESTAMPTZ`。Flyway 脚本规划：
 - `V1__init.sql`：建表
 - `V2__seed_business_data.sql`：业务种子数据
-- `V3__seed_demo_users.sql`：演示账号（初始密码从环境变量读取）
+- ~~`V3__seed_demo_users.sql`~~：演示账号改由 `DemoUserInitializer` 在启动时创建（`app.demo.seed-users=true`，local profile 默认开启）。原因：初始密码来自环境变量，放进 Flyway 占位符会让明文进入 SQL，修改密码后还会改变迁移脚本的校验和；在 Java 里创建还能复用应用的 `PasswordEncoder`。只在账号不存在时创建，不覆盖已有密码。
 
 与 v0.1 相比的变化用 `-- v0.2` 标注。
 
@@ -631,14 +670,15 @@ CREATE INDEX idx_anomaly_time_type ON biz_anomaly_event(occurred_at, event_type)
 - 统一前缀 `/api/v1`。
 - 统一响应体 `{code, message, data, traceId}`。
 - 响应头带 `X-Trace-Id`。
-- 分页参数 `page`、`size`。
-- HTTP 状态码：400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在（**访问不属于自己的资源也返回 404**，避免泄露资源是否存在）/ 409 冲突 / 429 限流 / 502 上游模型错误。
+- 分页参数 `page`（从 1 开始）、`size`（1–100）；分页结果为 `{items, page, size, total}`。
+- HTTP 状态码：400 参数错误 / 401 未认证 / 403 无权限 / 404 不存在（**访问不属于自己的资源也返回 404**，避免泄露资源是否存在）/ 409 冲突 / 429 限流（带 `Retry-After` 头）/ 502 上游模型错误。
+- 401 细分错误码：`UNAUTHORIZED`（未登录、Token 无效/过期/已登出，不区分具体原因）、`BAD_CREDENTIALS`（用户名或密码错误，用户不存在时也返回它）、`ACCOUNT_DISABLED`（账号已停用，登录时只在口令正确时才会返回）、`REFRESH_TOKEN_INVALID`（前端收到后跳转登录页）。
 
 ### 6.2 认证、用户、知识库、文档
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/auth/login` · `/auth/refresh` · `/auth/logout` | 公开 / 登录 | Refresh Token 轮换；登出时 jti 进入黑名单 |
+| POST | `/auth/login` · `/auth/refresh` · `/auth/logout` | 公开 / 公开 / 登录 | 登录和刷新返回 `{tokenType, accessToken, expiresIn, refreshToken, refreshExpiresIn, user}`（时长单位为秒）；Refresh Token 轮换；登出时 jti 进入黑名单，请求体可带 `refreshToken` 一并撤销 |
 | GET | `/users/me` | 登录 | 返回角色和区域范围（前端据此控制菜单显示，但**真正的权限由后端判断**） |
 | POST / GET / PATCH | `/admin/users[/{id}]` | ADMIN | 创建用户、启用/停用、修改角色和 `regionScope` |
 | POST / GET | `/knowledge-bases` | 登录 | 列表只返回有权限的知识库 |
@@ -702,7 +742,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | 层级 | 工具 | 重点用例 |
 |---|---|---|
 | 单元测试 | JUnit 5 + Mockito + AssertJ | 切分器（边界、重叠、不跨页、超长句）· `CitationParser`（§4.5 的层次 A）· `SensitiveDataMasker`（每条规则的正例和反例，包括 Luhn 误判）· `ToolPolicy` 权限矩阵（角色 × 工具 × 区域的参数化测试）· 区域范围求交 · 调用预算 · 重试退避计算 · 文档和消息状态机的非法状态转换 · 报告 Markdown 生成 |
-| 接口切片测试 | `@WebMvcTest` + Spring Security Test | 每个接口的 401 / 403 / 404（访问他人资源）/ 400；`/admin/**` 对非 ADMIN 用户返回 403 |
+| 接口切片测试 | `@WebMvcTest` + Spring Security Test（组合注解 `@SecuredWebMvcTest`：使用真实的 SecurityConfig 和 JWT 校验，只 mock 依赖 Redis/数据库的组件） | 每个接口的 401 / 403 / 404（访问他人资源）/ 400；`/admin/**` 对非 ADMIN 用户返回 403，且业务 Service 不被调用 |
 | 集成测试 | Testcontainers（`pgvector/pgvector:pg17`、`redis:7`）+ Fake 模型 | 见下方列表 |
 | 架构测试 | ArchUnit | 分层规则；tool 包不能直接执行 SQL；AI 调用类不能使用 `@Transactional` |
 | 离线评测（P1） | 评测集 + 真实模型 | §4.5 的层次 B；不进入 CI |
@@ -731,7 +771,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | 阶段 | 内容 | 验收标准（实现后验证） |
 |---|---|---|
 | **M0 骨架 + Spike** ✅ 2026-11-04 完成 | 锁定版本；Maven 工程和包结构；Compose（postgres + redis）；Flyway V1；统一响应和异常；TraceId；Actuator；ArchUnit；`.env.example`；完成 Spike S1–S5 并把结论写回 §2.2 | `docker compose up -d` 后 health 返回 UP；`mvn verify` 在没有 Key 的情况下通过；仓库中没有密钥；§2.2 的 5 项都有明确结论和选定的退路 |
-| **M1 认证与权限** | 用户、JWT、Refresh Token 轮换、登出黑名单、角色、区域范围、限流、`/admin/users` | 三种角色可以登录；401/403/404 的语义符合约定；登出后旧 Token 失效；账号停用后立即失效 |
+| **M1 认证与权限** ✅ 2026-11-04 完成 | 用户、JWT、Refresh Token 轮换、登出黑名单、角色、区域范围、限流、`/admin/users` | 三种角色可以登录；401/403/404 的语义符合约定；登出后旧 Token 失效；账号停用后立即失效 |
 | **M2 知识库与入库** | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
 | **M3 KB_QA 与会话** | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
 | **M4 Agent 与工具** | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
@@ -754,7 +794,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 
 | 页面 | 功能 |
 |---|---|
-| 登录页 | 登录；Axios 拦截器在收到 401 时自动刷新一次 Token 并重放请求，刷新失败则跳回登录页 |
+| 登录页 | 登录；Axios 拦截器在收到 401 时自动刷新一次 Token 并重放请求，刷新失败则跳回登录页。刷新必须串行（single-flight）：同一时刻只发一个刷新请求，其余请求等待它的结果，否则会触发 Refresh Token 的重用检测（§4.8） |
 | 知识库 | 知识库列表、新建、成员管理；文档表格（状态标签，PENDING/PROCESSING 时轮询，FAILED 时显示错误码并提供重试按钮）；拖拽上传；chunk 预览抽屉；检索调试面板 |
 | 智能对话 | **左栏**：会话列表（新建时选择模式和知识库、搜索、重命名、删除、按时间分组）。**中栏**：消息流，Markdown 渲染（`markdown-it` 关闭 HTML，再经过 `DOMPurify` 净化，代码高亮）；流式渲染用 `requestAnimationFrame` 节流；`[n]` 渲染成可点击的角标；“停止生成”按钮；失败或中断的消息可以重试。**工具调用时间线**：折叠卡片显示工具名、脱敏参数、状态（进行中、成功、被拒绝、失败）、耗时和结果摘要。**右侧引用面板**：文档名、页码、片段、相似度，点击角标时联动高亮 |
 | 报告 | 列表、Markdown 预览、下载 |
@@ -795,6 +835,8 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | ADR-10 | 报告数字由 Java 确定性生成，MVP 中不让 LLM 写报告段落 | 杜绝数字被编造，测试可以断言结果相等；也减少一次模型调用 | 让 LLM 直接生成报告全文 | 报告的叙述性较弱，由对话中的最终回答来补充分析 |
 | ADR-11 | 消息表自管，不使用 `MessageChatMemoryAdvisor` | 消息表需要保存引用、工具步骤、状态和归属信息；多数 ChatMemory 仓储实现不支持工具消息 | 使用 Spring AI 的 ChatMemory | 需要手动拼接历史消息（代码量很小） |
 | ADR-12 | SSE 使用 POST + fetch stream | 可以携带请求体和 Authorization 请求头；断开连接就能触发服务端取消 | 原生 EventSource、WebSocket | 前端需要引入一个小依赖 |
+| ADR-13 | Refresh Token 用不透明随机串，存在 Redis 中，每次刷新都轮换，并做重用检测 | 可以随时撤销；Redis 只存哈希，泄露也拿不到原文；旧令牌被重复使用时撤销整个令牌族，能发现令牌被盗用 | 长期有效的 JWT Refresh Token（无法撤销）；数据库表（需要自己清理过期数据） | 前端必须串行刷新；重用检测会让合法用户也重新登录一次 |
+| ADR-14 | Access Token 只携带身份；角色和区域范围每个请求都从数据库加载（短 TTL 缓存，事务提交后清除） | 停用账号、修改角色立即生效，不必等 Token 过期；权限的唯一来源是数据库 | 把角色写进 Token（修改后最多要等 15 分钟才生效）；每个请求都直接查库（可行，但没有必要） | 每个请求多一次缓存读取；多实例部署时需要广播缓存清除 |
 
 ---
 
@@ -817,4 +859,5 @@ APP_LLM_LOG_CONTENT=MASKED_PREVIEW  # NONE | MASKED_PREVIEW
 APP_LOG_RETENTION_DAYS=30
 APP_RATE_LIMIT_PER_MINUTE=20
 APP_AGENT_TOOL_BUDGET=6
+APP_LOGIN_RATE_LIMIT_PER_MINUTE=10  # M1：每个客户端 IP 每分钟的登录次数
 ```

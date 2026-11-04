@@ -10,6 +10,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.time.Duration;
+
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -20,6 +22,7 @@ import com.example.kbagent.common.trace.TraceIdFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -56,6 +59,16 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/probe/boom")
         ApiResponse<Void> boom() {
             throw new IllegalStateException("db password=secret123 leaked in message");
+        }
+
+        @GetMapping("/probe/rate-limited")
+        ApiResponse<Void> rateLimited() {
+            throw new RateLimitedException(Duration.ofMillis(1500));
+        }
+
+        @GetMapping("/probe/method-security-denied")
+        ApiResponse<Void> methodSecurityDenied() {
+            throw new AuthorizationDeniedException("Access Denied");
         }
 
         @PostMapping("/probe/create")
@@ -105,6 +118,21 @@ class GlobalExceptionHandlerTest {
                 .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
                 .andExpect(jsonPath("$.message").value(ErrorCode.INTERNAL_ERROR.defaultMessage()))
                 .andExpect(content().string(not(containsString("secret123"))));
+    }
+
+    @Test
+    void rateLimitedIs429WithRetryAfterRoundedUp() throws Exception {
+        mvc.perform(get("/probe/rate-limited"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().string("Retry-After", "2"))
+                .andExpect(jsonPath("$.code").value("RATE_LIMITED"));
+    }
+
+    @Test
+    void methodSecurityDenialIs403NotInternalError() throws Exception {
+        mvc.perform(get("/probe/method-security-denied"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
     }
 
     @Test
