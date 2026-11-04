@@ -1,0 +1,22 @@
+spring:
+  ai:
+    openai:
+      # 未设置 AI_API_KEY 时使用占位值，仅用于让上下文能启动（S5 不调用模型）。
+      api-key: ${AI_API_KEY:offline-placeholder}
+      # Spring AI 2.0 底层是 OpenAI 官方 Java SDK：base-url 必须包含 /v1，SDK 只拼接 /chat/completions、/embeddings。
+      # （1.x 的写法是不带 /v1，由框架拼接 /v1/...；照搬到 2.0 会得到 404。）
+      base-url: ${AI_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      chat:
+        options:
+          model: ${AI_CHAT_MODEL:qwen-plus}
+          temperature: 0.2
+          # S2：2.0 中流式请求在未配置 stream-options 时默认发送 stream_options.include_usage=true，
+          # 不需要额外配置（1.x 的 stream-usage 属性在 2.0 中已不存在）。
+      embedding:
+        options:
+          model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
+          dimensions: ${AI_EMBEDDING_DIMENSIONS:1024}
+
+logging:
+  level:
+    org.springframework.ai: INFO

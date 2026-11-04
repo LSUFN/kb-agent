@@ -1,0 +1,6 @@
+# 本地开发 profile：从项目根目录的 .env 读取配置（与 docker compose 共用同一份 .env）。
+# 启动：mvn spring-boot:run -Dspring-boot.run.profiles=local
+# 测试不激活此 profile，因此 .env 里的值不会混入测试环境。
+spring:
+  config:
+    import: "optional:file:.env[.properties]"
