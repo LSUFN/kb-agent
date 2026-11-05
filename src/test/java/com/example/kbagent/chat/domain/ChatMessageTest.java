@@ -36,7 +36,7 @@ class ChatMessageTest {
         assertThat(answer.status()).isEqualTo(MessageStatus.STREAMING);
         assertThat(answer.content()).isEmpty();
 
-        answer.complete("30 天[1]", CitationMode.NORMAL, "[]", null);
+        answer.complete("30 天[1]", CitationMode.NORMAL, "[]", null, null);
 
         assertThat(answer.status()).isEqualTo(MessageStatus.OK);
         assertThat(answer.citationMode()).isEqualTo(CitationMode.NORMAL);
@@ -57,7 +57,7 @@ class ChatMessageTest {
         assertThat(answer.status()).isEqualTo(status);
         assertThat(answer.content()).isEqualTo("部分内容");
         assertThat(answer.errorCode()).isEqualTo(errorCode);
-        assertThatThrownBy(() -> answer.complete("x", CitationMode.NORMAL, "[]", null))
+        assertThatThrownBy(() -> answer.complete("x", CitationMode.NORMAL, "[]", null, null))
                 .isInstanceOf(IllegalStateException.class);
     }
 

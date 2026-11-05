@@ -36,6 +36,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -170,6 +171,32 @@ class AgentIT {
         long messageId = stream.first("meta").data().path("messageId").asLong();
         assertThat(jdbc.queryForObject("SELECT content FROM chat_message WHERE id = ?", String.class, messageId))
                 .isEqualTo(stream.text());
+    }
+
+    /** 实测：复用旧会话时，模型照着历史里自己编造的“127 起”原样又说了一遍。含未核实数字的轮次不再作为历史。 */
+    @Test
+    void roundsWithUnverifiedNumbersAreLeftOutOfTheHistory() {
+        User analyst = newUser(Role.ANALYST);
+        long conversationId = agentConversation(analyst, null);
+        String path = ChatFixtures.streamPath(conversationId);
+        chatModel.script(answerWith("华北上个月共发生异常事件 127 起。"), answerWith("华东的订单情况如下。"),
+                answerWith("抱歉，你无权查看华北的数据。"));
+
+        api.stream(path, analyst, body("华北上个月有多少异常事件？"));
+        api.stream(path, analyst, body("华东的订单情况"));
+        api.stream(path, analyst, body("那华北上个月有多少异常事件？"));
+
+        List<Message> prompt = chatModel.lastPrompt().getInstructions();
+        assertThat(prompt).extracting(Message::getMessageType).containsExactly(MessageType.SYSTEM,
+                MessageType.USER, MessageType.ASSISTANT, MessageType.USER);
+        assertThat(prompt.get(2).getText()).isEqualTo("华东的订单情况如下。");
+        assertThat(prompt).noneMatch(m -> m.getText() != null && m.getText().contains("127"));
+
+        // 历史消息接口里能看到每条回答的核对结果：编造的那条列出 127，没有数字的那条为空数组
+        JsonNode items = api.get("/api/v1/conversations/" + conversationId + "/messages", analyst).data().path("items");
+        assertThat(items.get(1).path("unverifiedNumbers").get(0).asString()).isEqualTo("127");
+        assertThat(items.get(3).path("unverifiedNumbers").isArray()).isTrue();
+        assertThat(items.get(3).path("unverifiedNumbers").size()).isZero();
     }
 
     @Test

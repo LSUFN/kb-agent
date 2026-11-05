@@ -55,7 +55,7 @@ class KbQaServiceTest {
         assertThat(((ChatEvent.Delta) events.get(2)).text()).isEqualTo(KbQaPrompts.REFUSAL);
         assertThat(((ChatEvent.Citations) events.get(3)).mode()).isEqualTo(CitationMode.NONE);
         assertThat(((ChatEvent.Done) events.get(4)).usage()).isNull();
-        verify(transactions).finishOk(11L, KbQaPrompts.REFUSAL, CitationMode.NONE, List.of(), List.of());
+        verify(transactions).finishOk(11L, KbQaPrompts.REFUSAL, CitationMode.NONE, List.of(), List.of(), null);
         verifyNoInteractions(chatClient, recorder);
     }
 
@@ -72,7 +72,7 @@ class KbQaServiceTest {
         assertThat(error.message()).isEqualTo(ErrorCode.UPSTREAM_TIMEOUT.defaultMessage());
         assertThat(error.traceId()).isEqualTo("trace-1");
         verify(transactions).finishFailed(11L, "", "UPSTREAM_TIMEOUT", List.of());
-        verify(transactions, never()).finishOk(anyLong(), any(), any(), any(), any());
+        verify(transactions, never()).finishOk(anyLong(), any(), any(), any(), any(), any());
         verifyNoInteractions(chatClient);
     }
 }

@@ -40,12 +40,13 @@ public final class ConversationCommands {
     }
 
     /**
-     * @param citations 没有引用时为空列表
-     * @param toolSteps AGENT 模式下本轮执行的工具调用，参数已脱敏；没有时为空列表
+     * @param citations         没有引用时为空列表
+     * @param toolSteps         AGENT 模式下本轮执行的工具调用，参数已脱敏；没有时为空列表
+     * @param unverifiedNumbers AGENT 回答的数字核对结果；没有做核对的消息为 null
      */
     public record MessageView(long id, MessageRole role, String content, MessageStatus status,
                               CitationMode citationMode, List<Citation> citations, List<ToolStep> toolSteps,
-                              String errorCode, String traceId, Instant createdAt) {
+                              List<String> unverifiedNumbers, String errorCode, String traceId, Instant createdAt) {
     }
 
     /**

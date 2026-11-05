@@ -39,6 +39,8 @@ public class ConversationService {
     };
     private static final TypeReference<List<ToolStep>> TOOL_STEP_LIST = new TypeReference<>() {
     };
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {
+    };
 
     private final ConversationRepository conversations;
     private final ChatMessageRepository messages;
@@ -120,8 +122,10 @@ public class ConversationService {
                 : objectMapper.readValue(m.citations(), CITATION_LIST);
         List<ToolStep> toolSteps = m.toolSteps() == null ? List.of()
                 : objectMapper.readValue(m.toolSteps(), TOOL_STEP_LIST);
+        List<String> unverified = m.unverifiedNumbers() == null ? null
+                : objectMapper.readValue(m.unverifiedNumbers(), STRING_LIST);
         return new MessageView(m.id(), m.role(), m.content(), m.status(), m.citationMode(), citations, toolSteps,
-                m.errorCode(), m.traceId(), m.createdAt());
+                unverified, m.errorCode(), m.traceId(), m.createdAt());
     }
 
     /** 转义 LIKE 的通配符，避免用户输入的 % 和 _ 被当作通配符。 */

@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
 > 版本 v0.2.7（2026-11-05）· **状态：M0–M4 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M4 的验收标准已验证（§4.8–§4.11）。M5 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.8 变更：数字核对的结果写入 `chat_message.unverified_numbers`（Flyway V3）；组装对话历史时跳过含有未核实数字的轮次（§4.11）。
 > v0.2.7 变更：M4 补充（§4.11）：AGENT 回答结束后做数字核对，`done` 事件新增 `unverifiedNumbers`；检索工具的结果改为与 KB_QA 相同的文本格式；更正 v0.2.6 中不可复现的“9/9”实测结果。
 > v0.2.6 变更：M4 落地，新增 §4.11。包括：工具改为强类型的 `AgentTool` + 参数 record（同时用于 JSON Schema、校验和脱敏）；`AgentRequestContext`、`CitationRegistry`、`ToolRegistry` 放在 tool 包，避免 agent ↔ tool 循环依赖；开启 Spring AI 2.0.2 默认关闭的工具名解析回退，让越权调用走到服务端校验；用真实模型改进 Agent 提示词（2/6 → 9/9）。
 > v0.2.5 变更：M3 落地，新增 §4.10。包括：用真实模型校准检索阈值（保持 0.5）；按实测改进引用提示词（合法引用从 6/15 提高到 15/15）；异常堆栈也要脱敏；SSE 响应显式声明 UTF-8；新增 `GET /conversations/{id}`；AGENT 会话在 M4 之前返回 400。
@@ -608,6 +609,7 @@ chatClient.prompt()
   - 带 % 的数字如果等于某两个出处数字相除的结果，也算有出处。分析类回答里占比很常见，每次都提示会让用户习惯性忽略，真正编造的数字反而不显眼。增长率等其他推算仍会被标出。
   - 不核对的数字：日期、月份、引用标记、列表序号、“第 N”、标识符。
   - 找不到出处的数字会在回答末尾追加一段提示（作为 delta 推送并写入消息，不认识新字段的客户端也能看到），并列在 `done` 事件的 `unverifiedNumbers` 中。本轮没有调用任何工具时，提示更严厉（“没有查询依据，请不要采用”）。
+  - 核对结果写入 `chat_message.unverified_numbers`（V3）。组装对话历史时，跳过回答中含有未核实数字的轮次。原因是用户复用旧会话测试时，模型照着历史里自己编造的“127 起”原样又说了一遍。V3 之前的回答没有核对记录，仍会进入历史。
   - 它只回答“有没有出处”，不判断计算对不对。KB_QA 暂不做核对：资料原文的数字写法更多样，误标的代价大于收益。
 
 **验收结果（2026-11-05）**：§8 的五项都已通过（见 README 的 M4 验收清单）。
@@ -741,6 +743,7 @@ CREATE TABLE chat_message (
   citations       JSONB,          -- [{index, documentId, filename, page, snippet, score}]
   citation_mode   VARCHAR(16),    -- v0.2：NORMAL / FALLBACK / NONE
   tool_steps      JSONB,          -- [{callId, tool, argsMasked, decision, ok, latencyMs, summary}]
+  -- unverified_numbers JSONB     -- M4 补充（V3）：AGENT 回答中找不到出处的数字；KB_QA 和 V3 之前的回答为 NULL
   status          VARCHAR(16) NOT NULL DEFAULT 'OK'
                   CHECK (status IN ('STREAMING','OK','FAILED','INTERRUPTED')),  -- v0.2
   error_code      VARCHAR(64),

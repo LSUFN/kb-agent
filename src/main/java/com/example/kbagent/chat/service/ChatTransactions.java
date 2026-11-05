@@ -96,14 +96,16 @@ public class ChatTransactions {
     /**
      * 短事务 2（成功）。返回 false 表示消息已不是 STREAMING（被扫描器收尾），本次写入被放弃。
      *
-     * @param toolSteps 没有工具调用时传空列表
+     * @param toolSteps         没有工具调用时传空列表
+     * @param unverifiedNumbers 数字核对的结果；没有做核对（KB_QA）时为 null
      */
     @Transactional
     public boolean finishOk(long messageId, String content, CitationMode mode, List<Citation> citations,
-                            List<ToolStep> toolSteps) {
+                            List<ToolStep> toolSteps, List<String> unverifiedNumbers) {
         return lockStreaming(messageId, MessageStatus.OK)
                 .map(m -> {
-                    m.complete(content, mode, objectMapper.writeValueAsString(citations), json(toolSteps));
+                    m.complete(content, mode, objectMapper.writeValueAsString(citations), json(toolSteps),
+                            unverifiedNumbers == null ? null : objectMapper.writeValueAsString(unverifiedNumbers));
                     return true;
                 })
                 .orElse(false);
@@ -151,7 +153,10 @@ public class ChatTransactions {
         return message;
     }
 
-    /** 最近几轮“问题 + 成功的回答”；失败、中断或还在输出的轮次不带给模型。 */
+    /**
+     * 最近几轮“问题 + 成功的回答”；失败、中断或还在输出的轮次不带给模型。
+     * 回答中有未核实数字的轮次也不带：实测模型会照着历史里自己编造的数字原样再说一遍（§4.11）。
+     */
     private List<HistoryRound> loadHistory(long conversationId, int rounds) {
         if (rounds <= 0) {
             return List.of();
@@ -166,7 +171,9 @@ public class ChatTransactions {
             ChatMessage answer = latest.get(i + 1);
             if (question.role() == MessageRole.USER && answer.role() == MessageRole.ASSISTANT
                     && answer.status() == MessageStatus.OK) {
-                history.add(new HistoryRound(question.content(), answer.content()));
+                if (!answer.hasUnverifiedNumbers()) {
+                    history.add(new HistoryRound(question.content(), answer.content()));
+                }
                 i++;
             }
         }

@@ -52,6 +52,11 @@ public class ChatMessage {
     @Column(name = "tool_steps", columnDefinition = "jsonb")
     private String toolSteps;
 
+    /** JSON 数组：数字核对找不到出处的数字。只有 AGENT 模式会写入（全部有出处时为 []），KB_QA 为 null。 */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "unverified_numbers", columnDefinition = "jsonb")
+    private String unverifiedNumbers;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private MessageStatus status;
@@ -91,13 +96,18 @@ public class ChatMessage {
         return message;
     }
 
-    /** @param toolStepsJson 没有工具调用时为 null */
-    public void complete(String finalContent, CitationMode mode, String citationsJson, String toolStepsJson) {
+    /**
+     * @param toolStepsJson         没有工具调用时为 null
+     * @param unverifiedNumbersJson 没有做数字核对时为 null
+     */
+    public void complete(String finalContent, CitationMode mode, String citationsJson, String toolStepsJson,
+                         String unverifiedNumbersJson) {
         transitionTo(MessageStatus.OK);
         this.content = finalContent;
         this.citationMode = mode;
         this.citations = citationsJson;
         this.toolSteps = toolStepsJson;
+        this.unverifiedNumbers = unverifiedNumbersJson;
     }
 
     /** 保留已经生成的部分内容和已经执行的工具步骤。 */
@@ -160,6 +170,15 @@ public class ChatMessage {
 
     public String toolSteps() {
         return toolSteps;
+    }
+
+    public String unverifiedNumbers() {
+        return unverifiedNumbers;
+    }
+
+    /** 回答中有找不到出处的数字（只对做过数字核对的回答成立）。 */
+    public boolean hasUnverifiedNumbers() {
+        return unverifiedNumbers != null && !unverifiedNumbers.isBlank() && !unverifiedNumbers.strip().equals("[]");
     }
 
     public MessageStatus status() {

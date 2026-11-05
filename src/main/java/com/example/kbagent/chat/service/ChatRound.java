@@ -144,7 +144,7 @@ public abstract class ChatRound {
             recordLlm(modelOutput, reportedUsage, null, null);
             if (claim()) {
                 deps.transactions().finishOk(turn.answerMessageId(), content, result.mode(), result.citations(),
-                        List.copyOf(toolSteps));
+                        List.copyOf(toolSteps), check == null ? null : check.unverified());
             }
             List<ChatEvent> events = new ArrayList<>();
             if (note != null) {
@@ -163,7 +163,7 @@ public abstract class ChatRound {
             answer.append(text);
             if (claim()) {
                 deps.transactions().finishOk(turn.answerMessageId(), text, result.mode(), result.citations(),
-                        List.copyOf(toolSteps));
+                        List.copyOf(toolSteps), null);
             }
             return List.<ChatEvent>of(new ChatEvent.Delta(text),
                     new ChatEvent.Citations(result.mode(), result.citations(), result.invalidIndices()),

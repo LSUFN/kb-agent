@@ -17,7 +17,7 @@
 | 知识库与文档入库（M2） | ✅ 知识库与成员权限、PDF 上传（去重、补偿、对账）、`async_task` 任务表（并发领取、租约、fencing、重试）、中文切分、Embedding 入库、异步删除和重新处理；真实的 54 页 PDF 9.3 秒变为 READY |
 | 知识库问答（M3） | ✅ 检索调试接口、KB_QA 流程（检索不到时拒答且不调用模型）、SSE 事件协议、引用解析、会话与消息状态机、调用日志与脱敏；已用真实的 qwen-plus 和 text-embedding-v3 校准检索阈值和引用提示词 |
 | Agent 与工具（M4） | ✅ 4 个业务工具（知识库检索、订单统计、异常事件统计、生成报告）、服务端逐次鉴权与区域收敛、调用预算、工具审计、SSE 工具事件、报告生成与下载；通义流式分片回放测试通过；已用 qwen-plus 实测并改进 Agent 提示词 |
-| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 313 个，集成测试 74 个，不需要 API Key |
+| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 313 个，集成测试 75 个，不需要 API Key |
 | Spike S1–S5 | ✅ 已在真实通义接口上执行（14 个用例全部通过），结论见 [ARCHITECTURE.md §2.2](docs/ARCHITECTURE.md) |
 
 ### M0 技术验证的主要结论
@@ -164,6 +164,7 @@ event:done   data:{"status":"OK","usage":{"prompt":3844,"completion":380,"estima
   - 统计 SQL 是固定的，模型只能填日期和枚举；报告由 Java 根据 SQL 结果生成，模型只拿到几个关键数字。集成测试会断言报告里的数字等于直接执行 SQL 的结果。
   - 但模型仍然可能不调用工具，直接在回答里写数字。实测出现过一次：分析员问华北上月的异常事件，模型没有查询就回答“127 起”，真实是 56 起。
   - 所以 AGENT 模式在回答结束后还会做一次**数字核对**：回答中的每个数字都要能在本轮的工具结果、参数或用户问题中找到出处。比对时容忍千分位、四舍五入、“万”换算、中文数字；能由两个结果相除得到的占比也算有出处。找不到出处的数字会在回答末尾追加一段提示，并列在 `done` 事件的 `unverifiedNumbers` 中（`NumberGroundingTest`、`AgentIT`）。
+  - 含有未核实数字的轮次不会作为历史带给模型。实测复用旧会话时，模型照着历史里自己编造的数字原样又说了一遍。
 - **可追溯**：
   - 每次工具调用都写 `tool_call_log`，参数已脱敏，结果只记摘要；工具步骤也随消息保存，历史消息里可以回看。
   - `llm_call_log` 记录本轮工具调用次数。
@@ -296,7 +297,7 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 - [x] SSE 中能看到工具调用的完整过程：meta → tool START → tool END → delta… → citations → done；工具步骤随消息保存（`AgentIT`）
 - [x] 通义流式分片回放测试通过（`TongyiStreamReplayTest`），并确认它在 Spring AI 2.0.0 下会失败
 - [x] 真实模型端到端：qwen-plus 完成本区统计、拒绝越权、生成报告、跨区对比、知识库检索加引用；提示词和检索结果格式按实测改进（见上文）
-- [x] 数字核对：模型不调用工具直接给出的数字会被标出，追加提示并写入 `unverifiedNumbers`；来自工具结果的数字和可由结果推算的占比不会被误标（`NumberGroundingTest`、`AgentIT`，以及 qwen-plus 复测）
+- [x] 数字核对：模型不调用工具直接给出的数字会被标出，追加提示并写入 `unverifiedNumbers`；来自工具结果的数字和可由结果推算的占比不会被误标；含未核实数字的轮次不进入后续历史（`NumberGroundingTest`、`AgentIT`，以及 qwen-plus 复测）
 
 ## 目录结构
 
