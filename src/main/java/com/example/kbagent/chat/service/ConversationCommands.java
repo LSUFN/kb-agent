@@ -13,6 +13,7 @@ import com.example.kbagent.chat.domain.Conversation;
 import com.example.kbagent.chat.domain.ConversationMode;
 import com.example.kbagent.chat.domain.MessageRole;
 import com.example.kbagent.chat.domain.MessageStatus;
+import com.example.kbagent.chat.domain.ToolStep;
 
 /** 会话和消息接口的请求与响应。 */
 public final class ConversationCommands {
@@ -38,16 +39,19 @@ public final class ConversationCommands {
         }
     }
 
-    /** @param citations 没有引用时为空列表 */
+    /**
+     * @param citations 没有引用时为空列表
+     * @param toolSteps AGENT 模式下本轮执行的工具调用，参数已脱敏；没有时为空列表
+     */
     public record MessageView(long id, MessageRole role, String content, MessageStatus status,
-                              CitationMode citationMode, List<Citation> citations, String errorCode, String traceId,
-                              Instant createdAt) {
+                              CitationMode citationMode, List<Citation> citations, List<ToolStep> toolSteps,
+                              String errorCode, String traceId, Instant createdAt) {
     }
 
     /** 非流式接口的返回值：把一轮问答的事件汇总成一个结果。 */
     public record ChatReply(long messageId, long userMessageId, String traceId, MessageStatus status, String content,
                             CitationMode citationMode, List<Citation> citations, List<Integer> invalidIndices,
-                            List<ChatEvent.RetrievedCandidate> candidates, ChatEvent.Usage usage, long latencyMs,
-                            Integer firstTokenMs) {
+                            List<ChatEvent.RetrievedCandidate> candidates, List<ToolStep> toolSteps,
+                            ChatEvent.Usage usage, long latencyMs, Integer firstTokenMs) {
     }
 }

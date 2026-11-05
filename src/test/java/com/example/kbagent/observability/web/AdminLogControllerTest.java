@@ -17,6 +17,8 @@ import java.util.List;
 import com.example.kbagent.common.api.PageResponse;
 import com.example.kbagent.observability.CallLogQueryService;
 import com.example.kbagent.observability.CallLogQueryService.LlmCallFilter;
+import com.example.kbagent.observability.CallLogQueryService.ToolCallFilter;
+import com.example.kbagent.observability.ToolAuditRecorder.Decision;
 import com.example.kbagent.support.SecuredWebMvcTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,5 +53,19 @@ class AdminLogControllerTest {
                         .param("from", "2026-11-04T00:00:00Z"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.total").value(0));
+    }
+
+    @Test
+    void toolCallLogsAreAdminOnlyAndFilterByDecision() throws Exception {
+        when(logs.toolCalls(eq(new ToolCallFilter(null, null, "countAnomalies", Decision.DENIED, null, null)),
+                eq(1), eq(20))).thenReturn(new PageResponse<>(List.of(), 1, 20, 0));
+
+        mvc.perform(get("/api/v1/admin/logs/tool-calls").with(as(ANALYST))).andExpect(status().isForbidden());
+        mvc.perform(get("/api/v1/admin/logs/tool-calls").with(as(ADMIN))
+                        .param("toolName", "countAnomalies").param("decision", "DENIED"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.total").value(0));
+        mvc.perform(get("/api/v1/admin/logs/tool-calls").with(as(ADMIN)).param("decision", "MAYBE"))
+                .andExpect(status().isBadRequest());
     }
 }

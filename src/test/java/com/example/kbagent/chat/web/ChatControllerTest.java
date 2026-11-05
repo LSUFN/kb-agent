@@ -24,7 +24,7 @@ import com.example.kbagent.chat.domain.Citation;
 import com.example.kbagent.chat.domain.CitationMode;
 import com.example.kbagent.chat.domain.MessageStatus;
 import com.example.kbagent.chat.service.ChatEvent;
-import com.example.kbagent.chat.service.KbQaService;
+import com.example.kbagent.chat.service.ChatService;
 import com.example.kbagent.common.error.BusinessException;
 import com.example.kbagent.common.error.RateLimitedException;
 import com.example.kbagent.support.SecuredWebMvcTest;
@@ -56,13 +56,13 @@ class ChatControllerTest {
     MockMvc mvc;
 
     @MockitoBean
-    KbQaService kbQa;
+    ChatService chat;
 
     @Test
     void anonymousIs401() throws Exception {
         mvc.perform(post(STREAM).contentType(MediaType.APPLICATION_JSON).content(BODY))
                 .andExpect(status().isUnauthorized());
-        verifyNoInteractions(kbQa);
+        verifyNoInteractions(chat);
     }
 
     @Test
@@ -76,14 +76,14 @@ class ChatControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"content\":\"" + "长".repeat(2001) + "\"}"))
                 .andExpect(status().isBadRequest());
-        verifyNoInteractions(kbQa);
+        verifyNoInteractions(chat);
     }
 
     /** 开始输出之前的错误按普通 JSON 返回，即使请求头是 Accept: text/event-stream。 */
     @Test
     void errorsBeforeStreamingAreJsonEvenForEventStreamRequests() throws Exception {
-        when(kbQa.ask(eq(USER), eq(6L), anyString(), any())).thenThrow(BusinessException.notFound("会话"));
-        when(kbQa.ask(eq(USER), eq(7L), anyString(), any()))
+        when(chat.ask(eq(USER), eq(6L), anyString(), any())).thenThrow(BusinessException.notFound("会话"));
+        when(chat.ask(eq(USER), eq(7L), anyString(), any()))
                 .thenThrow(new RateLimitedException(Duration.ofSeconds(30)));
 
         mvc.perform(post("/api/v1/conversations/6/messages/stream").with(as(USER))
@@ -102,7 +102,7 @@ class ChatControllerTest {
 
     @Test
     void streamWritesNamedEventsWithJsonData() throws Exception {
-        when(kbQa.ask(eq(USER), eq(5L), eq("报销期限？"), any())).thenReturn(Flux.fromIterable(ANSWER));
+        when(chat.ask(eq(USER), eq(5L), eq("报销期限？"), any())).thenReturn(Flux.fromIterable(ANSWER));
 
         MvcResult started = mvc.perform(post(STREAM).with(as(USER)).accept(MediaType.TEXT_EVENT_STREAM)
                         .contentType(MediaType.APPLICATION_JSON).content(BODY))
@@ -121,7 +121,7 @@ class ChatControllerTest {
 
     @Test
     void nonStreamingEndpointCollectsTheEvents() throws Exception {
-        when(kbQa.ask(eq(USER), eq(5L), eq("报销期限？"), any())).thenReturn(Flux.fromIterable(ANSWER));
+        when(chat.ask(eq(USER), eq(5L), eq("报销期限？"), any())).thenReturn(Flux.fromIterable(ANSWER));
 
         MvcResult started = mvc.perform(post(SEND).with(as(USER))
                         .contentType(MediaType.APPLICATION_JSON).content(BODY))
@@ -141,7 +141,7 @@ class ChatControllerTest {
 
     @Test
     void nonStreamingEndpointTurnsAnErrorEventInto502() throws Exception {
-        when(kbQa.ask(eq(USER), anyLong(), anyString(), any())).thenReturn(Flux.just(
+        when(chat.ask(eq(USER), anyLong(), anyString(), any())).thenReturn(Flux.just(
                 new ChatEvent.Meta(11L, 10L, "trace-1"),
                 new ChatEvent.Error("UPSTREAM_TIMEOUT", "模型服务超时，请稍后重试", "trace-1")));
 

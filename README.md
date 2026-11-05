@@ -2,7 +2,7 @@
 
 基于 Java 21 + Spring Boot 4.1 + Spring AI 2.0 的企业知识库问答（RAG）与业务分析 Agent 平台，作为 Java 后端工程实践作品。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）、M3（知识库问答与会话）已完成（2026-11-05），下一阶段是 M4 Agent 与工具。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
+> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）、M3（知识库问答与会话）、M4（Agent 与工具）已完成（2026-11-05），下一阶段是 M5 前端。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
 
 ## 当前状态
 
@@ -16,7 +16,8 @@
 | 认证与权限（M1） | ✅ JWT 登录、Refresh Token 轮换与重用检测、登出黑名单、三种角色与区域范围、登录限流、用户管理接口；集成测试和本机冒烟检查都已通过 |
 | 知识库与文档入库（M2） | ✅ 知识库与成员权限、PDF 上传（去重、补偿、对账）、`async_task` 任务表（并发领取、租约、fencing、重试）、中文切分、Embedding 入库、异步删除和重新处理；真实的 54 页 PDF 9.3 秒变为 READY |
 | 知识库问答（M3） | ✅ 检索调试接口、KB_QA 流程（检索不到时拒答且不调用模型）、SSE 事件协议、引用解析、会话与消息状态机、调用日志与脱敏；已用真实的 qwen-plus 和 text-embedding-v3 校准检索阈值和引用提示词 |
-| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 235 个，集成测试 65 个，不需要 API Key |
+| Agent 与工具（M4） | ✅ 4 个业务工具（知识库检索、订单统计、异常事件统计、生成报告）、服务端逐次鉴权与区域收敛、调用预算、工具审计、SSE 工具事件、报告生成与下载；通义流式分片回放测试通过；已用 qwen-plus 实测并改进 Agent 提示词 |
+| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 293 个，集成测试 72 个，不需要 API Key |
 | Spike S1–S5 | ✅ 已在真实通义接口上执行（14 个用例全部通过），结论见 [ARCHITECTURE.md §2.2](docs/ARCHITECTURE.md) |
 
 ### M0 技术验证的主要结论
@@ -120,6 +121,60 @@ event:done       data:{"status":"OK","usage":{"prompt":987,"completion":12,"esti
 
 本地运行时，问答同样需要在 `.env` 中填写 `AI_API_KEY`；集成测试使用脚本化的假 Chat 模型和假 Embedding 模型，不需要 Key。
 
+## Agent 与工具（M4）
+
+设计见 [ARCHITECTURE.md §4.4](docs/ARCHITECTURE.md)，实现细节、Spring AI 2.0.2 的框架行为和实测数据见 §4.11。创建会话时传 `{"mode": "AGENT"}`，提问接口和事件协议与 M3 相同，多了 `tool` 事件。
+
+| 工具 | USER | ANALYST | ADMIN | 说明 |
+|---|---|---|---|---|
+| `searchKnowledgeBase(query, kbId?)` | ✅ | ✅ | ✅ | 只检索有权访问的知识库；多次检索的引用编号全局分配 |
+| `queryOrderStats(from, to, region?, groupBy)` | ❌ | ✅ 限本人区域 | ✅ | 订单数、成交订单数、成交金额、取消和退款数；按区域、品类、状态、天、月分组 |
+| `countAnomalies(from, to, eventType?, minSeverity?, region?, groupBy)` | ❌ | ✅ 限本人区域 | ✅ | 异常事件数、未处理数、平均处理时长 |
+| `generateReport(reportType, from, to, region?)` | ❌ | ✅ 限本人区域 | ✅ | 生成 Markdown 报告，每人每分钟最多 5 份 |
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/reports` · `/reports/{id}` | 本人 / ADMIN | 报告列表和详情（含 Markdown 原文）；不属于自己的报告返回 404 |
+| GET | `/reports/{id}/download` | 本人 / ADMIN | 下载 `.md` 文件（`text/markdown`，中文文件名） |
+| GET | `/admin/logs/tool-calls` | ADMIN | 工具调用审计，可按 traceId、用户、工具名、`decision`（ALLOWED / DENIED / INVALID / BUDGET_EXCEEDED）、时间过滤 |
+
+一次带工具调用的提问：
+
+```
+event:meta   data:{"messageId":201,"userMessageId":200,"traceId":"…"}
+event:tool   data:{"callId":"c1","name":"queryOrderStats","phase":"START","args":{"from":"2026-10-07","to":"2026-11-05","region":"EAST","groupBy":"CATEGORY"}}
+event:tool   data:{"callId":"c1","name":"queryOrderStats","phase":"END","decision":"ALLOWED","ok":true,"latencyMs":24,"summary":"共 5 组，订单 299 单，成交金额 350594.19 元"}
+event:delta  data:{"text":"华东地区最近30天…"}        （多次）
+event:citations data:{"mode":"NONE","citations":[],"invalidIndices":[]}
+event:done   data:{"status":"OK","usage":{"prompt":3844,"completion":380,"estimated":false},"latencyMs":10292,"firstTokenMs":1589}
+```
+
+几条关键行为（都有测试覆盖，见 `AgentIT`、`GuardedToolCallbackTest`、`ToolPolicyTest`、`DataScopeTest`）：
+
+- **权限由服务端逐次校验**：
+  - 每次工具调用都按固定顺序执行：服务端上下文 → 角色 → 参数校验 → 区域收敛 → 调用预算 → 执行 → 审计。
+  - 身份来自服务端注入的上下文，模型给出的参数改变不了“我是谁、能看什么”。
+  - 只向模型暴露有权限的工具，但这不是安全边界：模型按名字调用没有暴露的工具时，同样会被拒绝并记为 DENIED。
+  - 被拒绝时把原因告诉模型，由模型向用户解释，不会报 500。
+- **区域范围**：分析员请求自己区域之外的数据会被拒绝；不指定区域时只统计自己的区域。业务 Service 内部会再校验一次，绕过工具直接调用也拿不到范围之外的数据。
+- **调用预算**：
+  - 每轮最多执行 6 次工具调用（`APP_AGENT_TOOL_BUDGET`），超出后工具不再执行，模型基于已有结果作答。
+  - 累计尝试达到 10 次时终止本轮，推送 `error`（`AGENT_ABORTED`），消息标记为 FAILED。
+- **数字不让模型编**：统计 SQL 是固定的，模型只能填日期和枚举；报告由 Java 根据 SQL 结果生成，模型只拿到几个关键数字。集成测试会断言报告里的数字等于直接执行 SQL 的结果。
+- **可追溯**：
+  - 每次工具调用都写 `tool_call_log`，参数已脱敏，结果只记摘要；工具步骤也随消息保存，历史消息里可以回看。
+  - `llm_call_log` 记录本轮工具调用次数。
+- **演示数据**：Flyway `V2` 确定性地生成 6000 条订单和 1500 条异常事件，覆盖迁移当天之前的 180 天，所以问“最近 30 天”总能查到数据。
+
+**通义流式分片回放测试**（`TongyiStreamReplayTest`，不需要 Key 和 Docker）：本地模拟服务器回放通义风格的工具调用分片（续传分片带 `"id": ""`），走真实的 OpenAiChatModel。Spring AI 2.0.2 下通过；切到 2.0.0 会按预期失败，所以以后升级 Spring AI 时能第一时间发现回归。
+
+**用真实模型实测**（2026-11-05，qwen-plus，详见 ARCHITECTURE.md §4.11）：
+- 分析员问华东的数据：参数被正确收敛为 `region=EAST`，回答中的数字与工具结果一致。
+- 分析员问华北：模型直接说明无权查看。
+- 生成报告：报告数字与统计结果一致。
+- 管理员对比各区域：一轮调用了两次工具。
+- 第一版 Agent 提示词下，模型会不检索就说找不到、把条款号写成引用编号、给业务数据也标编号。修改后，同一组问题的合格次数从 2/6 提高到 9/9。
+
 ## 环境要求
 
 - JDK 21
@@ -154,11 +209,11 @@ Invoke-RestMethod http://localhost:8080/api/v1/users/me -Headers @{ Authorizatio
 
 ### 手动测试接口
 
-[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、检索调试、问答（流式和非流式）、拒答、历史消息、调用日志、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
+[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、检索调试、问答（流式和非流式）、拒答、历史消息、调用日志、Agent 工具调用（含越权）、报告下载、工具审计、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
 
 1. 启动基础设施和后端（见上文）。文档入库和问答都要调用通义，需要先在 `.env` 中填写 `AI_API_KEY`。
 2. 在 `http/` 目录创建 `http-client.private.env.json`（已被 `.gitignore` 忽略）：`{ "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }`。
-3. 打开 `kb-agent.http`，右上角的环境选 `local`，从上到下依次点击每个请求左侧的 ▶。
+3. 打开 `kb-agent.http`，把编辑器上方 **Run with** 下拉框从 No Environment 改为 `local`，然后从上到下依次点击每个请求左侧的 ▶。不选环境会报 `unsubstituted variable 'baseUrl'`。
 
 ### 在 IntelliJ IDEA 中运行
 
@@ -226,11 +281,21 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 - [x] 其他：用户只能检索有权访问的知识库；别人的会话返回 404 且不写入任何数据；上游失败为 FAILED 并推送 error 事件；超时收尾、心跳、用量估算、游标分页；Spring AI observation 不记录内容（`ApplicationIT`）
 - [x] 真实模型端到端：qwen-plus + text-embedding-v3 完成检索阈值校准和引用提示词校准（见上文）
 
+## M4 验收清单（2026-11-05 在本机执行完毕）
+
+- [x] 权限矩阵的参数化测试：角色 × 工具（`ToolPolicyTest`）、角色 × 区域（`DataScopeTest`）；GuardedToolCallback 的固定执行顺序（`GuardedToolCallbackTest`）
+- [x] 越权集成测试：ANALYST（EAST）请求 NORTH、USER 调用没有暴露的 `countAnomalies`，都被拒绝，审计为 DENIED，业务仓储没有被调用（`AgentIT`，用 spy 验证）
+- [x] 报告数字与 SQL 一致：报告中的订单数、成交订单数、成交金额、取消数和各品类订单数，等于直接执行 SQL 的结果；只有本人和 ADMIN 能查看（`AgentIT`）
+- [x] 超出调用预算时安全收尾：第 7 次调用返回 BUDGET_EXCEEDED，模型仍然给出回答；第 10 次尝试终止本轮，消息为 FAILED，已执行的工具步骤被保存（`AgentIT`）
+- [x] SSE 中能看到工具调用的完整过程：meta → tool START → tool END → delta… → citations → done；工具步骤随消息保存（`AgentIT`）
+- [x] 通义流式分片回放测试通过（`TongyiStreamReplayTest`），并确认它在 Spring AI 2.0.0 下会失败
+- [x] 真实模型端到端：qwen-plus 完成本区统计、拒绝越权、生成报告、跨区对比、知识库检索加引用；提示词按实测改进（见上文）
+
 ## 目录结构
 
 ```
 .
-├── docs/ARCHITECTURE.md        架构设计（v0.2.5）
+├── docs/ARCHITECTURE.md        架构设计（v0.2.6）
 ├── docker-compose.yml          基础设施
 ├── .env.example                环境变量模板
 ├── pom.xml
@@ -248,14 +313,18 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 │   ├── storage                 文件存储（本地实现）与孤儿文件对账
 │   ├── task                    通用异步任务：扫描、领取、租约、fencing、重试
 │   ├── retrieval               带权限过滤的向量检索、检索调试接口
-│   ├── chat                    会话与消息、KB_QA 流程（SSE）、引用解析、提示词、超时收尾
+│   ├── chat                    会话与消息、问答分发与通用流程（ChatRound）、KB_QA、SSE、引用解析、超时收尾
+│   ├── agent                   AGENT 模式：组装带工具的请求、注入服务端上下文、合并工具事件和模型输出
+│   ├── tool                    4 个工具、GuardedToolCallback、ToolPolicy、调用预算、引用编号表、工具解析器
+│   ├── business                订单和异常事件的只读统计（固定的参数化 SQL）、区域范围规则
+│   ├── report                  报告生成（确定性 Markdown）、查看和下载
 │   ├── observability           脱敏（SensitiveDataMasker、Logback 转换器）、模型调用日志、日志查询与清理
 │   └── system/web              冒烟接口
 ├── src/main/resources
 │   ├── application.yml
 │   ├── application-local.yml   本地开发 profile（读取 .env，创建演示账号）
 │   ├── logback-spring.xml      应用日志脱敏（消息和异常堆栈）
-│   └── db/migration/V1__init.sql
+│   └── db/migration             V1 建表，V2 演示业务数据
 ├── src/test/java/...           单元测试、接口切片测试、ArchUnit、集成测试
 ├── http/                       手动测试脚本（IntelliJ HTTP Client）和示例 PDF
 └── spikes/                     M0 技术验证（独立 Maven 工程，结论见 ARCHITECTURE.md §2.2）

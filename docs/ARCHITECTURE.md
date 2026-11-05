@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.5（2026-11-05）· **状态：M0–M3 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M3 的验收标准已验证（§4.8–§4.10）。M4 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.6（2026-11-05）· **状态：M0–M4 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M4 的验收标准已验证（§4.8–§4.11）。M5 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.6 变更：M4 落地，新增 §4.11。包括：工具改为强类型的 `AgentTool` + 参数 record（同时用于 JSON Schema、校验和脱敏）；`AgentRequestContext`、`CitationRegistry`、`ToolRegistry` 放在 tool 包，避免 agent ↔ tool 循环依赖；开启 Spring AI 2.0.2 默认关闭的工具名解析回退，让越权调用走到服务端校验；用真实模型改进 Agent 提示词（2/6 → 9/9）。
 > v0.2.5 变更：M3 落地，新增 §4.10。包括：用真实模型校准检索阈值（保持 0.5）；按实测改进引用提示词（合法引用从 6/15 提高到 15/15）；异常堆栈也要脱敏；SSE 响应显式声明 UTF-8；新增 `GET /conversations/{id}`；AGENT 会话在 M4 之前返回 400。
 > v0.2.4 变更：M2 落地，新增 §4.9 记录实现细节和设计调整，包括：PDF 解析改为直接使用 PDFBox；`GET /knowledge-bases/{kbId}` 对 READ 级别开放；只有清空了文档的知识库才能删除。
 > v0.2.3 变更：M1 落地，新增 §4.8 认证与会话的实现细节和 ADR-13、ADR-14；演示账号改为启动时初始化，不再使用 Flyway V3（§5）；分页参数 `page` 从 1 开始（§6.1）。
@@ -536,6 +537,74 @@ chatClient.prompt()
 - 领域外的问题 0.13–0.23 秒拒答，没有 Chat 调用记录。
 - 用户在第 5 个 delta 后断开，0.3 秒内消息变为 INTERRUPTED，保存了已生成的 140 个字。调用日志记录为 `CLIENT_CLOSED`，耗时 0.8 秒（完整回答需要约 6 秒），说明上游请求确实被中止了。
 
+### 4.11 Agent 与工具（M4 实现）
+
+§4.4 的设计已落地。工具循环使用 Spring AI 自带的 ToolCallingAdvisor（L0，没有升级到 L1/L2）。下面记录实现细节、框架行为和实测数据。
+
+**模块与依赖方向**：`agent → chat / tool`，`tool → business / report / retrieval / observability`，`report → business`。
+
+- chat 不依赖 agent。chat 定义了 `ChatModeHandler` 接口，KB_QA（chat 模块）和 AGENT（agent 模块）各自实现，`ChatService` 按会话模式分发。
+- 一轮问答中与模式无关的部分抽到模板类 `ChatRound`，两种模式共用：首字时间、用量、累计输出、工具步骤、三种结束方式的互斥收尾、调用日志、错误转换。
+- 与 §3.2 不同的地方：`AgentRequestContext`、`CitationRegistry`、`ToolRegistry` 放在 tool 包，而不是 agent 包。GuardedToolCallback 要读取上下文，ToolRegistry 要作为 Spring AI 的解析器，放在 agent 包会形成 agent ↔ tool 的循环依赖（ArchUnit 禁止）。
+
+**工具定义**：每个工具实现 `AgentTool<A>`，参数是一个 record。同一个 record 有三个用途：
+- 用 `JsonSchemaGenerator` 生成给模型的 JSON Schema。`@ToolParam` 标在 record 组件上，提供描述和是否必填。
+- 做 Jakarta Validation。
+- 用 `@Sensitive` 标注需要脱敏的字段。
+
+这样只有一个来源。§4.4.1 原定使用 `@Tool` 注解方法，没有采用：GuardedToolCallback 必须在执行之前拿到强类型的参数，才能做校验和范围收敛，`@Tool` 方法的参数到执行时才由框架转换。
+
+4 个工具：
+- `searchKnowledgeBase`：检索结果按本轮的 `CitationRegistry` 全局编号，同一个片段再次出现时沿用原编号。
+- `queryOrderStats`、`countAnomalies`：统计结果同时返回分组行和全部数据的合计。
+- `generateReport`：唯一的写操作。
+
+**GuardedToolCallback** 按 §4.4.3 的 7 步执行。另外有几点实现细节：
+- 被拒绝（`FORBIDDEN_TOOL`、`FORBIDDEN_SCOPE`）、参数不合法（`INVALID_ARGUMENTS`）、超出预算（`BUDGET_EXCEEDED`）时，也推送一对 tool START / END 事件、写审计日志、记入消息的工具步骤，再把结构化的错误返回给模型。所以 SSE 和历史消息里能看到每一次尝试。
+- 尝试次数达到上限时，先写一条审计（`error_code = AGENT_ABORTED`），再抛出 `AgentAbortException`。它继承自 BusinessException，只是 RuntimeException，不是 ToolExecutionException（S4）。`ChatRound` 会沿着异常链找到它，转成 `error` 事件，并把消息标记为 FAILED。
+- 业务 Service 抛出的 `ScopeDeniedException`（二次校验）记为 DENIED。限流和其他业务异常记为“已放行但执行失败”。未知异常返回 `TOOL_ERROR`，不把内部信息交给模型。
+- 参数按大小写不敏感解析枚举（模型偶尔会写 `east`）。参数解析失败时，错误详情可能回显参数，先脱敏再截断。
+
+**Spring AI 2.0.2 的框架行为**（实现时发现，升级时要复查）：
+1. **工具名解析回退默认关闭**（`spring.ai.tools.resolution.fallback.enabled=false`）。模型按名字调用没有暴露给它的工具时，`DefaultToolCallingManager` 不会去问 ToolCallbackResolver，而是直接抛出 `IllegalStateException: No ToolCallback found`，整轮失败。越权调用因此走不到服务端校验，也不会留下审计记录。我们开启了回退，并让 `ToolRegistry` 替换默认的解析器：它只返回受保护的回调（不存在的工具名返回一个只会报错的回调）。这样越权调用会被 GuardedToolCallback 按角色拒绝，记为 DENIED。AgentIT 覆盖了这个场景（USER 的请求只暴露检索工具，模型仍然调用 `countAnomalies`）。
+2. **ChatClient 以 `ChatModel.getOptions()` 为基础合并请求选项**（`getDefaultOptions()` 已废弃）。只有返回 `ToolCallingChatOptions` 时，toolCallbacks 和 toolContext 才会进入请求，否则工具被静默忽略。OpenAiChatModel 满足这个条件；测试用的 FakeChatModel 必须同样实现。
+3. 框架新增了工具调用次数上限：默认单个工具 40 次、合计 150 次（`spring.ai.tools.limits.*`），远大于我们的预算，不会先触发。
+4. 定位第 1 点时曾怀疑是自动配置的先后顺序导致 ToolCallingAdvisor 没有使用容器里的 ToolCallingManager。打印运行时的装配后确认不是，所以没有保留那个额外的配置。
+
+**业务数据**：
+- `V2__seed_business_data.sql` 用 `hashtext` 确定性地生成 6000 条订单和 1500 条异常事件，覆盖迁移当天之前的 180 天，区域分布刻意不均匀（EAST 最多）。
+- 统计 SQL 是固定的：分组表达式和可选条件都是枚举里的常量片段，取值全部参数绑定。按业务时区（`app.business.zone`）划分自然日。时间跨度不超过 366 天，分组不超过 100 行，超出时截断并标记。
+- `DataScope` 是区域范围的唯一规则：ADMIN 全部区域，ANALYST 自己的区域，USER 没有。工具的第 4 步和 `BizStatsService` 内部的二次校验都用它，所以绕过工具直接调用 Service 也拿不到范围之外的数据。
+
+**报告**：
+- `ReportMarkdown` 是纯函数，报告里的每个数字都来自统计结果（ADR-10）。报告包括总览，以及按区域、品类、时间的表格（31 天以内按天，否则按月）。`report.params` 记录收敛之后实际生效的区域。
+- 生成报告按用户限流，每分钟 5 次。
+- 只有本人和 ADMIN 能查看和下载，其他人返回 404。
+- 下载的文件名包含中文标题，按 RFC 6266 用 `filename*` 编码。
+
+**提示词（按实测修改）**：Agent 的 System Prompt 写明当前用户的角色、数据范围和今天的日期（业务时区），让模型少做无效尝试。真正的权限仍由服务端校验。用 qwen-plus 实测时发现三个问题：
+- 不检索就说知识库里没有；
+- 把原文的“第九条”写成 `[9]`；
+- 给业务数据也标上 `[1]`、`[2]`。
+
+做了三处修改：
+- System Prompt 要求制度类问题必须先检索，并给出引用编号的正反例；
+- 检索工具的结果里再提醒一次引用规则（工具结果离回答最近）；
+- 业务数据工具的结果里写明区域代码的中文名，并说明这些数据不需要标编号。
+
+同一组问题（2 个制度类问题和 1 个业务数据问题）的合格次数从 **2/6** 提高到 **9/9**。
+
+**验收结果（2026-11-05）**：§8 的五项都已通过（见 README 的 M4 验收清单）。
+
+- **通义流式分片回放测试**：本地模拟服务器回放 S2 记录的分片（续传分片带 `"id": ""`），走真实的 OpenAiChatModel。Spring AI 2.0.2 下通过。切到 2.0.0 运行同一个测试会失败（`NoSuchElementException`，与 S2 记录的现象一致），说明它确实能拦住这个回归。
+- **真实模型端到端**（qwen-plus）：
+  - 华东分析员问品类订单：正确收敛为 `region=EAST`，回答中的数字与工具结果一致。
+  - 分析员问华北：模型根据提示词直接说明无权查看，没有发起调用。
+  - 生成报告：报告数字与统计结果一致。
+  - 管理员对比各区域：调用了两次统计工具。
+  - 普通员工问订单量：直接说明没有权限。
+  - 工具执行耗时 8–362 毫秒；一轮带工具调用的回答（含模型的两次调用）4.0–10.4 秒。
+
 ---
 
 ## 5. 数据库表设计
@@ -788,7 +857,7 @@ CREATE INDEX idx_anomaly_time_type ON biz_anomaly_event(occurred_at, event_type)
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/conversations` | 登录 | `{mode: KB_QA\|AGENT, kbId?, title?}`。所有角色都可以创建 AGENT 会话，**可用的工具由角色决定**（§4.4.3）；M4 之前创建 AGENT 会话返回 400 |
+| POST | `/conversations` | 登录 | `{mode: KB_QA\|AGENT, kbId?, title?}`。所有角色都可以创建 AGENT 会话，**可用的工具由角色决定**（§4.4.3） |
 | GET | `/conversations?keyword=&page=` | 本人 | 按更新时间倒序 |
 | GET | `/conversations/{id}` | 本人 | 会话详情（M3 新增） |
 | PATCH / DELETE | `/conversations/{id}` | 本人 | 重命名、软删除 |
@@ -867,7 +936,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | **M1 认证与权限** ✅ 2026-11-04 完成 | 用户、JWT、Refresh Token 轮换、登出黑名单、角色、区域范围、限流、`/admin/users` | 三种角色可以登录；401/403/404 的语义符合约定；登出后旧 Token 失效；账号停用后立即失效 |
 | **M2 知识库与入库** ✅ 2026-11-04 完成 | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
 | **M3 KB_QA 与会话** ✅ 2026-11-05 完成 | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
-| **M4 Agent 与工具** | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
+| **M4 Agent 与工具** ✅ 2026-11-05 完成 | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
 | **M5 前端** | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
 | **M6 部署与文档** | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
 | P1（MVP 之后） | 离线评测（§4.5 层次 B）；GitHub Actions CI；混合检索 / Rerank；问题改写；指标看板 | 评测结果来自真实运行 |

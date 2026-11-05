@@ -6,7 +6,7 @@ import java.util.Locale;
 import com.example.kbagent.chat.domain.ChatMessage;
 import com.example.kbagent.chat.domain.Citation;
 import com.example.kbagent.chat.domain.Conversation;
-import com.example.kbagent.chat.domain.ConversationMode;
+import com.example.kbagent.chat.domain.ToolStep;
 import com.example.kbagent.chat.repository.ChatMessageRepository;
 import com.example.kbagent.chat.repository.ConversationRepository;
 import com.example.kbagent.chat.service.ConversationCommands.ConversationView;
@@ -15,7 +15,6 @@ import com.example.kbagent.chat.service.ConversationCommands.MessageView;
 import com.example.kbagent.common.api.CursorPage;
 import com.example.kbagent.common.api.PageResponse;
 import com.example.kbagent.common.error.BusinessException;
-import com.example.kbagent.common.error.ErrorCode;
 import com.example.kbagent.knowledge.domain.KbAccess;
 import com.example.kbagent.knowledge.service.KbPermissionService;
 import com.example.kbagent.user.domain.Actor;
@@ -38,6 +37,8 @@ public class ConversationService {
 
     private static final TypeReference<List<Citation>> CITATION_LIST = new TypeReference<>() {
     };
+    private static final TypeReference<List<ToolStep>> TOOL_STEP_LIST = new TypeReference<>() {
+    };
 
     private final ConversationRepository conversations;
     private final ChatMessageRepository messages;
@@ -52,11 +53,9 @@ public class ConversationService {
         this.objectMapper = objectMapper;
     }
 
+    /** 所有角色都可以创建 AGENT 会话，可用的工具由角色决定（§4.4.3）。 */
     @Transactional
     public ConversationView create(Actor actor, CreateConversation command) {
-        if (command.mode() == ConversationMode.AGENT) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "Agent 模式将在 M4 开放");
-        }
         if (command.kbId() != null) {
             permissions.require(actor, command.kbId(), KbAccess.READ);
         }
@@ -119,7 +118,9 @@ public class ConversationService {
     private MessageView toView(ChatMessage m) {
         List<Citation> citations = m.citations() == null ? List.of()
                 : objectMapper.readValue(m.citations(), CITATION_LIST);
-        return new MessageView(m.id(), m.role(), m.content(), m.status(), m.citationMode(), citations,
+        List<ToolStep> toolSteps = m.toolSteps() == null ? List.of()
+                : objectMapper.readValue(m.toolSteps(), TOOL_STEP_LIST);
+        return new MessageView(m.id(), m.role(), m.content(), m.status(), m.citationMode(), citations, toolSteps,
                 m.errorCode(), m.traceId(), m.createdAt());
     }
 

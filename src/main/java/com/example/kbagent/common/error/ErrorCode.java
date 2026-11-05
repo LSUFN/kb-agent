@@ -24,6 +24,8 @@ public enum ErrorCode {
     RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "请求过于频繁，请稍后再试"),
     UPSTREAM_ERROR(HttpStatus.BAD_GATEWAY, "模型服务异常，请稍后重试"),
     UPSTREAM_TIMEOUT(HttpStatus.BAD_GATEWAY, "模型服务超时，请稍后重试"),
+    /** 模型反复调用工具（达到尝试上限），本轮被终止（§4.4.2）。 */
+    AGENT_ABORTED(HttpStatus.BAD_GATEWAY, "模型反复调用工具，已终止本轮回答，请换个问法再试"),
     INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR, "服务器内部错误");
 
     private final HttpStatus httpStatus;

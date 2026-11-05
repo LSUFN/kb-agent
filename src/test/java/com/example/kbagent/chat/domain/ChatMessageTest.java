@@ -36,18 +36,18 @@ class ChatMessageTest {
         assertThat(answer.status()).isEqualTo(MessageStatus.STREAMING);
         assertThat(answer.content()).isEmpty();
 
-        answer.complete("30 天[1]", CitationMode.NORMAL, "[]");
+        answer.complete("30 天[1]", CitationMode.NORMAL, "[]", null);
 
         assertThat(answer.status()).isEqualTo(MessageStatus.OK);
         assertThat(answer.citationMode()).isEqualTo(CitationMode.NORMAL);
-        assertThatThrownBy(() -> answer.fail("x", "UPSTREAM_ERROR")).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> answer.interrupt("x", "CLIENT_CLOSED")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> answer.fail("x", "UPSTREAM_ERROR", null)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> answer.interrupt("x", "CLIENT_CLOSED", null)).isInstanceOf(IllegalStateException.class);
     }
 
     @Test
     void failedAndInterruptedKeepPartialContent() {
-        assertTerminal(m -> m.fail("部分内容", "UPSTREAM_TIMEOUT"), MessageStatus.FAILED, "UPSTREAM_TIMEOUT");
-        assertTerminal(m -> m.interrupt("部分内容", "CLIENT_CLOSED"), MessageStatus.INTERRUPTED, "CLIENT_CLOSED");
+        assertTerminal(m -> m.fail("部分内容", "UPSTREAM_TIMEOUT", null), MessageStatus.FAILED, "UPSTREAM_TIMEOUT");
+        assertTerminal(m -> m.interrupt("部分内容", "CLIENT_CLOSED", null), MessageStatus.INTERRUPTED, "CLIENT_CLOSED");
     }
 
     private static void assertTerminal(Consumer<ChatMessage> transition, MessageStatus status, String errorCode) {
@@ -57,7 +57,7 @@ class ChatMessageTest {
         assertThat(answer.status()).isEqualTo(status);
         assertThat(answer.content()).isEqualTo("部分内容");
         assertThat(answer.errorCode()).isEqualTo(errorCode);
-        assertThatThrownBy(() -> answer.complete("x", CitationMode.NORMAL, "[]"))
+        assertThatThrownBy(() -> answer.complete("x", CitationMode.NORMAL, "[]", null))
                 .isInstanceOf(IllegalStateException.class);
     }
 

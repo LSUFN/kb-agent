@@ -3,17 +3,22 @@ package com.example.kbagent.support;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -21,6 +26,9 @@ import reactor.core.publisher.Mono;
 /**
  * 集成测试用的脚本化 Chat 模型（§7 的 ScriptedChatModel）：按脚本把回答切成若干分片流式返回，
  * 最后一个分片带用量（与通义兼容模式一致，S2）。可以注入分片间延迟和中途失败，并记录收到的 Prompt。
+ * <p>
+ * AGENT 测试用 {@link #script(Step...)} 按顺序编排每次模型调用的输出：发起工具调用，或者给出回答。
+ * Spring AI 的工具循环执行完工具后会再次调用模型，取脚本中的下一步；脚本用完后回到默认回答。
  * 所有集成测试共用一个实例，每个测试前后调用 {@link #reset()}。
  */
 public class FakeChatModel implements ChatModel {
@@ -30,6 +38,29 @@ public class FakeChatModel implements ChatModel {
     public static final int COMPLETION_TOKENS = 45;
     public static final String DEFAULT_ANSWER = "这是默认回答[1]。";
 
+    /** 一次模型调用的输出。 */
+    public sealed interface Step {
+    }
+
+    /** 发起一次或多次工具调用（同一个响应中）。 */
+    public record CallTools(List<AssistantMessage.ToolCall> calls) implements Step {
+    }
+
+    /** 给出回答文本，按 chunkSize 切成分片。 */
+    public record Answer(String text) implements Step {
+    }
+
+    /** 调用一个工具，arguments 是 JSON。 */
+    public static Step callTool(String name, String arguments) {
+        return new CallTools(List.of(new AssistantMessage.ToolCall("call_" + name + "_" + System.nanoTime(),
+                "function", name, arguments)));
+    }
+
+    public static Step answerWith(String text) {
+        return new Answer(text);
+    }
+
+    private final Queue<Step> script = new ConcurrentLinkedQueue<>();
     private final AtomicInteger calls = new AtomicInteger();
     private final List<Prompt> prompts = new CopyOnWriteArrayList<>();
     private final AtomicBoolean cancelled = new AtomicBoolean();
@@ -40,6 +71,12 @@ public class FakeChatModel implements ChatModel {
     private volatile boolean reportUsage = true;
     private volatile RuntimeException failure;
     private volatile int failAfterChunks;
+
+    /** 按顺序编排接下来几次模型调用的输出。 */
+    public void script(Step... steps) {
+        script.clear();
+        script.addAll(List.of(steps));
+    }
 
     /** 下一次（及之后）调用返回的完整回答，按 chunkSize 个字符切成分片。 */
     public void answer(String text) {
@@ -92,12 +129,23 @@ public class FakeChatModel implements ChatModel {
         prompts.clear();
         cancelled.set(false);
         calledInsideTransaction.set(false);
+        script.clear();
         answer = DEFAULT_ANSWER;
         chunkSize = 4;
         delayPerChunk = Duration.ZERO;
         reportUsage = true;
         failure = null;
         failAfterChunks = 0;
+    }
+
+    /**
+     * 与 OpenAiChatOptions 一样返回 ToolCallingChatOptions。2.0 的 ChatClient 以 getOptions().mutate() 为基础合并请求选项，
+     * 只有它支持工具调用时，toolCallbacks 和 toolContext 才会进入请求、工具循环才会执行；
+     * 普通的 ChatOptions 会让工具被静默忽略。
+     */
+    @Override
+    public ChatOptions getOptions() {
+        return ToolCallingChatOptions.builder().build();
     }
 
     @Override
@@ -113,7 +161,16 @@ public class FakeChatModel implements ChatModel {
     public Flux<ChatResponse> stream(Prompt prompt) {
         return Flux.defer(() -> {
             record(prompt);
-            List<String> chunks = split(answer, chunkSize);
+            Step step = script.poll();
+            if (step instanceof CallTools tools) {
+                AssistantMessage message = AssistantMessage.builder().content("").toolCalls(tools.calls()).build();
+                ChatGenerationMetadata finish = ChatGenerationMetadata.builder().finishReason("tool_calls").build();
+                return Flux.just(new ChatResponse(List.of(new Generation(message, finish)),
+                        ChatResponseMetadata.builder().model(MODEL)
+                                .usage(new DefaultUsage(PROMPT_TOKENS, COMPLETION_TOKENS)).build()));
+            }
+            String text = step instanceof Answer a ? a.text() : answer;
+            List<String> chunks = split(text, chunkSize);
             RuntimeException error = failure;
             int count = error == null ? chunks.size() : Math.min(failAfterChunks, chunks.size());
             Duration delay = delayPerChunk;

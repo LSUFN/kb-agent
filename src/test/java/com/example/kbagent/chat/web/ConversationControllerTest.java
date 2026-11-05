@@ -25,7 +25,6 @@ import com.example.kbagent.chat.service.ConversationService;
 import com.example.kbagent.common.api.CursorPage;
 import com.example.kbagent.common.api.PageResponse;
 import com.example.kbagent.common.error.BusinessException;
-import com.example.kbagent.common.error.ErrorCode;
 import com.example.kbagent.support.SecuredWebMvcTest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -76,14 +75,14 @@ class ConversationControllerTest {
     }
 
     @Test
-    void agentModeIsNotAvailableYet() throws Exception {
-        when(conversations.create(eq(USER), any(CreateConversation.class)))
-                .thenThrow(new BusinessException(ErrorCode.BAD_REQUEST, "Agent 模式将在 M4 开放"));
+    void anyRoleCanCreateAnAgentConversation() throws Exception {
+        when(conversations.create(eq(USER), any(CreateConversation.class))).thenReturn(new ConversationView(6L,
+                "新会话", ConversationMode.AGENT, null, Instant.now(), Instant.now()));
 
         mvc.perform(post("/api/v1/conversations").with(as(USER))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"mode\":\"AGENT\"}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message").value("Agent 模式将在 M4 开放"));
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.mode").value("AGENT"));
     }
 
     @Test

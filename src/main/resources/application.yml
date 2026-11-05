@@ -70,6 +70,11 @@ spring:
     tools:
       observations:
         include-content: false
+      # 模型按名字调用了没有暴露给它的工具时，允许经 ToolCallbackResolver（即 ToolRegistry）解析。
+      # ToolRegistry 只会返回受保护的回调，越权调用因此会被服务端校验拒绝并记审计（DENIED），而不是让整轮报错（§4.4.3）
+      resolution:
+        fallback:
+          enabled: true
 
 server:
   shutdown: graceful
@@ -143,3 +148,14 @@ app:
     # NONE：不记录用户问题；MASKED_PREVIEW：脱敏后记录前 200 字（§4.6）
     content: ${APP_LLM_LOG_CONTENT:MASKED_PREVIEW}
     retention-days: ${APP_LOG_RETENTION_DAYS:30}
+  agent:
+    # 每轮最多执行的工具调用次数；累计尝试达到 max-tool-attempts 时终止本轮（§4.4.2）
+    tool-budget: ${APP_AGENT_TOOL_BUDGET:6}
+    max-tool-attempts: 10
+    # 每个用户每分钟最多生成的报告数（§4.4.3）
+    report-rate-limit-per-minute: 5
+  business:
+    # 业务统计按这个时区划分自然日
+    zone: Asia/Shanghai
+    max-span-days: 366
+    max-rows: 100

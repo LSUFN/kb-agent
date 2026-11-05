@@ -1,6 +1,7 @@
 package com.example.kbagent.chat.service;
 
 import java.util.List;
+import java.util.Map;
 
 import com.example.kbagent.chat.domain.Citation;
 import com.example.kbagent.chat.domain.CitationMode;
@@ -9,7 +10,8 @@ import com.example.kbagent.retrieval.service.RetrievalService.Candidate;
 
 /**
  * 一轮问答中推送给客户端的事件（§6.4）。record 的字段就是 SSE data 中的 JSON 字段。
- * 正常顺序：meta → retrieval → delta… → citations → done；失败时以 error 结束。
+ * 正常顺序：KB_QA 为 meta → retrieval → delta… → citations → done；AGENT 为 meta → (tool START → tool END)…
+ * → delta… → citations → done，工具调用和文本可以交替出现。失败时以 error 结束。
  */
 public sealed interface ChatEvent {
 
@@ -18,6 +20,8 @@ public sealed interface ChatEvent {
         return switch (this) {
             case Meta m -> "meta";
             case Retrieval r -> "retrieval";
+            case ToolStart t -> "tool";
+            case ToolEnd t -> "tool";
             case Delta d -> "delta";
             case Citations c -> "citations";
             case Done d -> "done";
@@ -40,6 +44,35 @@ public sealed interface ChatEvent {
     }
 
     record RetrievedCandidate(int index, long documentId, String filename, int page, double score) {
+    }
+
+    /**
+     * 开始执行一次工具调用。
+     *
+     * @param phase 固定为 START
+     * @param args  已脱敏的参数
+     */
+    record ToolStart(String callId, String name, String phase, Map<String, Object> args) implements ChatEvent {
+
+        public ToolStart(String callId, String name, Map<String, Object> args) {
+            this(callId, name, "START", args);
+        }
+    }
+
+    /**
+     * 一次工具调用结束（包括被拒绝、参数不合法、超出预算）。
+     *
+     * @param phase    固定为 END
+     * @param decision ALLOWED / DENIED / INVALID / BUDGET_EXCEEDED
+     * @param ok       工具是否执行成功
+     * @param summary  结果摘要，例如“共 37 条，按类型分 4 组”
+     */
+    record ToolEnd(String callId, String name, String phase, String decision, boolean ok, long latencyMs,
+                   String summary) implements ChatEvent {
+
+        public ToolEnd(String callId, String name, String decision, boolean ok, long latencyMs, String summary) {
+            this(callId, name, "END", decision, ok, latencyMs, summary);
+        }
     }
 
     record Delta(String text) implements ChatEvent {

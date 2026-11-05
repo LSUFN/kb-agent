@@ -241,8 +241,8 @@ class ChatLifecycleIT {
         assertThat(api.get("/api/v1/conversations", owner).data().path("total").asLong()).isEqualTo(1);
 
         Response agent = api.post("/api/v1/conversations", owner, "{\"mode\":\"AGENT\"}");
-        assertThat(agent.status()).isEqualTo(400);
-        assertThat(agent.body().path("message").asString()).contains("M4");
+        assertThat(agent.status()).isEqualTo(201);
+        assertThat(agent.data().path("mode").asString()).isEqualTo("AGENT");
     }
 
     @Test

@@ -2,10 +2,10 @@
 #
 # 准备：
 #   1. docker compose up -d，并用运行配置“KbAgentApplication (local)”启动后端
-#   2. 文档入库（Embedding）和问答（qwen-plus）都要调用通义：在 .env 中填写 AI_API_KEY
+#   2. 文档入库（Embedding）、问答和 Agent（qwen-plus）都要调用通义：在 .env 中填写 AI_API_KEY
 #   3. 在本目录创建 http-client.private.env.json（已被 .gitignore 忽略）：
 #        { "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }
-# 使用：编辑器右上角的环境选 local，然后从上到下依次点击每个请求左侧的 ▶。
+# 使用：编辑器上方的 Run with 下拉框选 local（不选会报 unsubstituted variable 'baseUrl'），然后从上到下依次点击每个请求左侧的 ▶。
 # 后面的请求会用到前面请求保存下来的 token、知识库 ID 和文档 ID。
 
 ### 1. 管理员登录（保存 token）
@@ -134,7 +134,60 @@ Authorization: Bearer {{adminToken}}
 GET {{baseUrl}}/api/v1/admin/logs/llm-calls?page=1&size=20
 Authorization: Bearer {{adminToken}}
 
-### 20. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
+### 20. 分析员登录（M4）：演示账号 analyst，数据范围只有华东（EAST）
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{"username": "analyst", "password": "{{password}}"}
+
+> {% client.global.set("analystToken", response.body.data.accessToken); %}
+
+### 21. 创建 Agent 会话：工具按角色暴露，分析员可以使用 4 个工具（普通员工只能检索知识库）
+POST {{baseUrl}}/api/v1/conversations
+Authorization: Bearer {{analystToken}}
+Content-Type: application/json
+
+{"mode": "AGENT"}
+
+> {% client.global.set("agentConvId", response.body.data.id); %}
+
+### 22. Agent 流式提问：先收到 tool START / END（调用了哪个工具、参数、结果摘要），再收到回答
+POST {{baseUrl}}/api/v1/conversations/{{agentConvId}}/messages/stream
+Authorization: Bearer {{analystToken}}
+Content-Type: application/json
+Accept: text/event-stream
+
+{"content": "华东最近 30 天各品类的订单情况怎么样？哪个品类成交金额最高？"}
+
+### 23. 越权：分析员问华北的数据。模型会说明无权查看；即使模型发起调用，服务端也会拒绝并在审计中记为 DENIED
+POST {{baseUrl}}/api/v1/conversations/{{agentConvId}}/messages
+Authorization: Bearer {{analystToken}}
+Content-Type: application/json
+
+{"content": "那华北上个月有多少异常事件？"}
+
+### 24. 生成报告：报告里的数字由系统根据 SQL 结果生成，不由模型编写
+POST {{baseUrl}}/api/v1/conversations/{{agentConvId}}/messages
+Authorization: Bearer {{analystToken}}
+Content-Type: application/json
+
+{"content": "帮我生成一份华东最近 30 天的订单经营报告"}
+
+### 25. 报告列表：本人的报告（管理员能看到所有人的），保存最新一份的 ID
+GET {{baseUrl}}/api/v1/reports?page=1&size=20
+Authorization: Bearer {{analystToken}}
+
+> {% client.global.set("reportId", response.body.data.items[0].id); %}
+
+### 26. 下载报告：Markdown 文件，文件名是报告标题
+GET {{baseUrl}}/api/v1/reports/{{reportId}}/download
+Authorization: Bearer {{analystToken}}
+
+### 27. 工具调用审计（只有管理员能看）：参数已脱敏；加 &decision=DENIED 只看被拒绝的调用。管理员 token 过期时重新执行 1
+GET {{baseUrl}}/api/v1/admin/logs/tool-calls?page=1&size=20
+Authorization: Bearer {{adminToken}}
+
+### 28. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
 POST {{baseUrl}}/api/v1/auth/refresh
 Content-Type: application/json
 
@@ -145,15 +198,15 @@ Content-Type: application/json
     client.global.set("adminRefresh", response.body.data.refreshToken);
 %}
 
-### 21. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
+### 29. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
 DELETE {{baseUrl}}/api/v1/documents/{{docId}}
 Authorization: Bearer {{adminToken}}
 
-### 22. 用户列表（管理员）
+### 30. 用户列表（管理员）
 GET {{baseUrl}}/api/v1/admin/users?page=1&size=20
 Authorization: Bearer {{adminToken}}
 
-### 23. 登出：之后用旧 token 执行 2 会返回 401
+### 31. 登出：之后用旧 token 执行 2 会返回 401
 POST {{baseUrl}}/api/v1/auth/logout
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json

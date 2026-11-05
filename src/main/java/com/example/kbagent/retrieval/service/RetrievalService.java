@@ -1,7 +1,10 @@
 package com.example.kbagent.retrieval.service;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import com.example.kbagent.common.error.BusinessException;
 import com.example.kbagent.common.error.ErrorCode;
@@ -65,14 +68,17 @@ public class RetrievalService {
      * @param kbId 为 null 时检索当前用户有权访问的全部知识库
      */
     public List<Candidate> retrieve(Actor actor, Long kbId, String query, CallContext context) {
-        List<Candidate> candidates = new ArrayList<>();
-        for (Candidate hit : search(actor, kbId, query, properties.topK(), context)) {
-            if (hit.score() >= properties.minScore()) {
-                candidates.add(new Candidate(candidates.size() + 1, hit.chunkId(), hit.documentId(), hit.filename(),
-                        hit.pageNumber(), hit.chunkIndex(), hit.content(), hit.score()));
-            }
-        }
-        return candidates;
+        return aboveThreshold(search(actor, kbId, query, properties.topK(), context));
+    }
+
+    /**
+     * 用于 Agent 工具：在指定的一组知识库中检索，阈值规则与 {@link #retrieve} 相同。
+     * 再按当前用户的权限过滤一遍，调用方传入的范围不会扩大用户的权限。
+     */
+    public List<Candidate> retrieveIn(Actor actor, Collection<Long> kbIds, String query, CallContext context) {
+        Set<Long> accessible = new HashSet<>(permissions.accessibleKbIds(actor));
+        List<Long> allowed = kbIds.stream().filter(accessible::contains).distinct().toList();
+        return aboveThreshold(searchIn(actor, allowed, query, properties.topK(), context));
     }
 
     /** 用于检索调试：返回前 topK 个片段和相似度，不应用阈值。index 是排名。 */
@@ -80,6 +86,10 @@ public class RetrievalService {
         List<Long> kbIds = kbId != null
                 ? List.of(permissions.require(actor, kbId, KbAccess.READ).kb().id())
                 : permissions.accessibleKbIds(actor);
+        return searchIn(actor, kbIds, query, topK, context);
+    }
+
+    private List<Candidate> searchIn(Actor actor, List<Long> kbIds, String query, int topK, CallContext context) {
         if (kbIds.isEmpty()) {
             return List.of();
         }
@@ -87,6 +97,17 @@ public class RetrievalService {
         List<Candidate> candidates = new ArrayList<>(hits.size());
         for (ChunkHit hit : hits) {
             candidates.add(Candidate.of(candidates.size() + 1, hit));
+        }
+        return candidates;
+    }
+
+    private List<Candidate> aboveThreshold(List<Candidate> ranked) {
+        List<Candidate> candidates = new ArrayList<>();
+        for (Candidate hit : ranked) {
+            if (hit.score() >= properties.minScore()) {
+                candidates.add(new Candidate(candidates.size() + 1, hit.chunkId(), hit.documentId(), hit.filename(),
+                        hit.pageNumber(), hit.chunkIndex(), hit.content(), hit.score()));
+            }
         }
         return candidates;
     }

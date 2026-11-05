@@ -47,6 +47,11 @@ public class ChatMessage {
     @Column(name = "citation_mode", length = 16)
     private CitationMode citationMode;
 
+    /** JSON 数组：[{callId, tool, args, decision, ok, latencyMs, summary}]，只有 AGENT 模式会写入。 */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "tool_steps", columnDefinition = "jsonb")
+    private String toolSteps;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     private MessageStatus status;
@@ -86,25 +91,29 @@ public class ChatMessage {
         return message;
     }
 
-    public void complete(String finalContent, CitationMode mode, String citationsJson) {
+    /** @param toolStepsJson 没有工具调用时为 null */
+    public void complete(String finalContent, CitationMode mode, String citationsJson, String toolStepsJson) {
         transitionTo(MessageStatus.OK);
         this.content = finalContent;
         this.citationMode = mode;
         this.citations = citationsJson;
+        this.toolSteps = toolStepsJson;
     }
 
-    /** 保留已经生成的部分内容。 */
-    public void fail(String partialContent, String code) {
+    /** 保留已经生成的部分内容和已经执行的工具步骤。 */
+    public void fail(String partialContent, String code, String toolStepsJson) {
         transitionTo(MessageStatus.FAILED);
         this.content = partialContent;
         this.errorCode = code;
+        this.toolSteps = toolStepsJson;
     }
 
-    /** 客户端断开（用户点击“停止生成”）：保留已经生成的部分内容。 */
-    public void interrupt(String partialContent, String code) {
+    /** 客户端断开（用户点击“停止生成”）：保留已经生成的部分内容和已经执行的工具步骤。 */
+    public void interrupt(String partialContent, String code, String toolStepsJson) {
         transitionTo(MessageStatus.INTERRUPTED);
         this.content = partialContent;
         this.errorCode = code;
+        this.toolSteps = toolStepsJson;
     }
 
     private void transitionTo(MessageStatus target) {
@@ -147,6 +156,10 @@ public class ChatMessage {
 
     public CitationMode citationMode() {
         return citationMode;
+    }
+
+    public String toolSteps() {
+        return toolSteps;
     }
 
     public MessageStatus status() {

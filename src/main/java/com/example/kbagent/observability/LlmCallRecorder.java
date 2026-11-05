@@ -41,6 +41,7 @@ public class LlmCallRecorder {
         private Integer promptTokens;
         private Integer completionTokens;
         private boolean usageEstimated;
+        private int toolCallCount;
         private String input;
         private Integer outputChars;
         private Integer firstTokenMs;
@@ -89,6 +90,12 @@ public class LlmCallRecorder {
             this.promptTokens = prompt;
             this.completionTokens = completion;
             this.usageEstimated = estimated;
+            return this;
+        }
+
+        /** 本轮执行的工具调用次数（AGENT 模式）。 */
+        public Entry toolCallCount(int value) {
+            this.toolCallCount = value;
             return this;
         }
 
@@ -141,10 +148,10 @@ public class LlmCallRecorder {
         try {
             jdbc.sql("""
                             INSERT INTO llm_call_log(trace_id, user_id, conversation_id, call_type, chat_mode, model, streamed,
-                                prompt_tokens, completion_tokens, usage_estimated, input_preview_masked, input_sha256,
+                                prompt_tokens, completion_tokens, usage_estimated, tool_call_count, input_preview_masked, input_sha256,
                                 output_chars, first_token_ms, latency_ms, success, error_code, error_message_masked)
                             VALUES (:traceId, :userId, :conversationId, :callType, :chatMode, :model, :streamed,
-                                :promptTokens, :completionTokens, :usageEstimated, :preview, :sha256,
+                                :promptTokens, :completionTokens, :usageEstimated, :toolCallCount, :preview, :sha256,
                                 :outputChars, :firstTokenMs, :latencyMs, :success, :errorCode, :errorMessage)""")
                     .param("traceId", e.traceId)
                     .param("userId", e.userId)
@@ -156,6 +163,7 @@ public class LlmCallRecorder {
                     .param("promptTokens", e.promptTokens)
                     .param("completionTokens", e.completionTokens)
                     .param("usageEstimated", e.usageEstimated)
+                    .param("toolCallCount", e.toolCallCount)
                     .param("preview", preview(e.input))
                     .param("sha256", e.input == null ? null : sha256(e.input))
                     .param("outputChars", e.outputChars)
