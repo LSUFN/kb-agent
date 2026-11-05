@@ -50,7 +50,7 @@ class ChatControllerTest {
             new ChatEvent.Delta("[1]"),
             new ChatEvent.Citations(CitationMode.NORMAL,
                     List.of(new Citation(1, 9L, "差旅制度.pdf", 3, "报销须在…", 0.82)), List.of(7)),
-            new ChatEvent.Done(MessageStatus.OK, new ChatEvent.Usage(100, 20, false), 1200, 300));
+            new ChatEvent.Done(MessageStatus.OK, new ChatEvent.Usage(100, 20, false), 1200, 300, null));
 
     @Autowired
     MockMvc mvc;

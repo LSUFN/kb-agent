@@ -48,10 +48,15 @@ public final class ConversationCommands {
                               String errorCode, String traceId, Instant createdAt) {
     }
 
-    /** 非流式接口的返回值：把一轮问答的事件汇总成一个结果。 */
+    /**
+     * 非流式接口的返回值：把一轮问答的事件汇总成一个结果。
+     *
+     * @param unverifiedNumbers 数字核对找不到出处的数字；KB_QA 模式不做核对，为 null
+     */
     public record ChatReply(long messageId, long userMessageId, String traceId, MessageStatus status, String content,
                             CitationMode citationMode, List<Citation> citations, List<Integer> invalidIndices,
                             List<ChatEvent.RetrievedCandidate> candidates, List<ToolStep> toolSteps,
-                            ChatEvent.Usage usage, long latencyMs, Integer firstTokenMs) {
+                            ChatEvent.Usage usage, long latencyMs, Integer firstTokenMs,
+                            List<String> unverifiedNumbers) {
     }
 }

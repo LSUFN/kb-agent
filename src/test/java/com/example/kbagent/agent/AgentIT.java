@@ -156,6 +156,39 @@ class AgentIT {
         assertThat(steps.get(0).path("decision").asString()).isEqualTo("ALLOWED");
     }
 
+    /** 数字核对：模型不调用工具直接给出数字（M4 实测发生过），回答末尾追加提示，done 事件列出这些数字。 */
+    @Test
+    void numbersWithoutAnyToolCallAreFlagged() {
+        User analyst = newUser(Role.ANALYST);
+        long conversationId = agentConversation(analyst, null);
+        chatModel.script(answerWith("根据查询结果，华北地区上个月共发生异常事件 127 起。"));
+
+        SseStream stream = api.stream(ChatFixtures.streamPath(conversationId), analyst, body("华北上个月有多少异常事件？"));
+
+        assertThat(stream.first("done").data().path("unverifiedNumbers").get(0).asString()).isEqualTo("127");
+        assertThat(stream.text()).startsWith("根据查询结果").contains("本轮没有调用任何查询工具").endsWith("127。");
+        long messageId = stream.first("meta").data().path("messageId").asLong();
+        assertThat(jdbc.queryForObject("SELECT content FROM chat_message WHERE id = ?", String.class, messageId))
+                .isEqualTo(stream.text());
+    }
+
+    @Test
+    void numbersTakenFromToolResultsPassTheCheck() {
+        User analyst = newUser(Role.ANALYST);
+        long conversationId = agentConversation(analyst, null);
+        Map<String, Object> total = orderTotals("EAST");
+        chatModel.script(callTool("queryOrderStats", args("groupBy", "REGION")),
+                answerWith("华东最近 30 天共 " + ReportMarkdown.count((Long) total.get("order_count")) + " 单，成交金额 "
+                        + ReportMarkdown.amount((BigDecimal) total.get("paid_amount")) + " 元，同比增长 123.4%。"));
+
+        SseStream stream = api.stream(ChatFixtures.streamPath(conversationId), analyst, body("华东最近 30 天的订单"));
+
+        // 订单数和金额来自工具结果；增长率无从得出（这里故意编了一个），会被标出
+        assertThat(stream.first("done").data().path("unverifiedNumbers").size()).isEqualTo(1);
+        assertThat(stream.first("done").data().path("unverifiedNumbers").get(0).asString()).isEqualTo("123.4");
+        assertThat(stream.text()).contains("可能是模型计算或推测得出的");
+    }
+
     @Test
     void analystCannotQueryAnotherRegionAndTheRepositoryIsNotCalled() {
         User analyst = newUser(Role.ANALYST);
@@ -312,9 +345,10 @@ class AgentIT {
 
         SseStream stream = api.stream(ChatFixtures.streamPath(conversationId), user, body("两页分别说了什么"));
 
+        // 检索结果是与 KB_QA 相同格式的文本，第二次检索的新片段接着编号
         List<String> responses = toolResponses();
-        assertThat(json.readTree(responses.get(0)).path("results").get(0).path("index").asInt()).isEqualTo(1);
-        assertThat(json.readTree(responses.get(1)).path("results").get(0).path("index").asInt()).isEqualTo(2);
+        assertThat(responses.get(0)).contains("[1] 《" + kb.filename() + "》第 1 页").contains("【引用要求】");
+        assertThat(responses.get(1)).contains("[2] 《" + kb.filename() + "》第 2 页").doesNotContain("[1] 《");
         JsonNode citations = stream.first("citations").data();
         assertThat(citations.path("mode").asString()).isEqualTo("NORMAL");
         assertThat(citations.path("citations").get(0).path("page").asInt()).isEqualTo(1);

@@ -16,7 +16,11 @@ import com.example.kbagent.user.domain.Region;
  */
 public interface AgentTool<A extends Record> {
 
-    /** 工具结果：返回给模型的数据，以及写入审计日志和 tool END 事件的摘要（不含明细）。 */
+    /**
+     * 工具结果：返回给模型的数据，以及写入审计日志和 tool END 事件的摘要（不含明细）。
+     *
+     * @param result 字符串原样交给模型，其他对象序列化为 JSON
+     */
     record Output(Object result, String summary) {
     }
 

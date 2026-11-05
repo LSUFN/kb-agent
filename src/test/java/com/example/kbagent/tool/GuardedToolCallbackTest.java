@@ -229,7 +229,7 @@ class GuardedToolCallbackTest {
 
             @Override
             public void finished(String callId, String name, Map<String, Object> args, Decision decision, boolean ok,
-                                 long latencyMs, String summary) {
+                                 long latencyMs, String summary, String result) {
                 events.add("END " + callId + " " + decision + " " + ok);
             }
         };

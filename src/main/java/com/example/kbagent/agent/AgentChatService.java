@@ -5,6 +5,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import com.example.kbagent.business.BusinessProperties;
 import com.example.kbagent.chat.domain.ConversationMode;
@@ -16,6 +17,7 @@ import com.example.kbagent.chat.service.ChatTransactions;
 import com.example.kbagent.chat.service.ChatTransactions.HistoryRound;
 import com.example.kbagent.chat.service.ChatTransactions.Turn;
 import com.example.kbagent.chat.service.CitationParser;
+import com.example.kbagent.chat.service.NumberGrounding;
 import com.example.kbagent.knowledge.service.KbPermissionService;
 import com.example.kbagent.observability.LlmCallRecorder;
 import com.example.kbagent.observability.ToolAuditRecorder.Decision;
@@ -86,6 +88,8 @@ public class AgentChatService implements ChatModeHandler {
 
         /** 本轮 searchKnowledgeBase 的结果，全局编号。 */
         private final CitationRegistry registry = new CitationRegistry();
+        /** 本轮工具的参数、返回结果和摘要：数字核对的出处。 */
+        private final List<String> evidence = new CopyOnWriteArrayList<>();
 
         AgentRound(Actor actor, Turn turn, String question, String traceId) {
             super(deps, actor, turn, question, traceId);
@@ -106,6 +110,12 @@ public class AgentChatService implements ChatModeHandler {
             return ChatRound.citationsFrom(answer, registry.all());
         }
 
+        /** 回答中的数字必须能在本轮的工具结果中找到出处（M4 实测：模型会不调用工具直接编数字）。 */
+        @Override
+        protected NumberGrounding.Result checkNumbers(String answer) {
+            return NumberGrounding.check(answer, question, evidence);
+        }
+
         /**
          * 模型输出（delta）和工具事件来自不同的线程：工具在 boundedElastic 上执行（S4）。
          * Flux.create 的 sink 是线程安全的，两路事件按发生顺序汇入同一个流；下游取消时连带取消模型请求。
@@ -122,7 +132,10 @@ public class AgentChatService implements ChatModeHandler {
 
                     @Override
                     public void finished(String callId, String tool, Map<String, Object> args, Decision decision,
-                                         boolean ok, long latencyMs, String summary) {
+                                         boolean ok, long latencyMs, String summary, String result) {
+                        evidence.add(String.valueOf(args));
+                        evidence.add(summary == null ? "" : summary);
+                        evidence.add(result == null ? "" : result);
                         addToolStep(new ToolStep(callId, tool, args, decision.name(), ok, latencyMs, summary));
                         sink.next(new ChatEvent.ToolEnd(callId, tool, decision.name(), ok, latencyMs, summary));
                     }

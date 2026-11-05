@@ -98,6 +98,11 @@ public abstract class ChatRound {
     /** 模型输出结束后，根据本轮的资料解析引用。 */
     protected abstract CitationResult citations(String answer);
 
+    /** 模型输出结束后的数字核对；返回 null 表示这种模式不做核对。 */
+    protected NumberGrounding.Result checkNumbers(String answer) {
+        return null;
+    }
+
     /**
      * 流式调用模型：文本分片转为 delta 事件，同时记录首字时间、用量和模型名。
      * 失败时写调用日志，并把异常转换为 BusinessException（上游错误归类为 UPSTREAM_*，其他保持原样）。
@@ -119,20 +124,36 @@ public abstract class ChatRound {
                 });
     }
 
-    /** 模型输出结束：解析引用、写调用日志、执行短事务 2，然后推送 citations 和 done。 */
+    /**
+     * 模型输出结束：数字核对、解析引用、写调用日志、执行短事务 2，然后推送 citations 和 done。
+     * 有找不到出处的数字时，在回答末尾追加一段提示（同时推送一个 delta 并写入消息），客户端不认识新字段也能看到。
+     */
     protected final Flux<ChatEvent> finish() {
         return Mono.fromCallable(() -> {
+            String modelOutput = answer.toString();
+            NumberGrounding.Result check = checkNumbers(modelOutput);
+            String note = NumberGrounding.note(check);
+            if (note != null) {
+                log.warn("unverified numbers in {} answer (traceId={}, messageId={}): {}", turn.mode(), traceId,
+                        turn.answerMessageId(), check.unverified());
+                answer.append(note);
+            }
             String content = answer.toString();
             CitationResult result = citations(content);
-            ChatEvent.Usage reportedUsage = usageOf(content);
-            recordLlm(content, reportedUsage, null, null);
+            ChatEvent.Usage reportedUsage = usageOf(modelOutput);
+            recordLlm(modelOutput, reportedUsage, null, null);
             if (claim()) {
                 deps.transactions().finishOk(turn.answerMessageId(), content, result.mode(), result.citations(),
                         List.copyOf(toolSteps));
             }
-            return List.<ChatEvent>of(new ChatEvent.Citations(result.mode(), result.citations(),
-                            result.invalidIndices()),
-                    new ChatEvent.Done(MessageStatus.OK, reportedUsage, elapsedMs(startNanos), firstTokenMs));
+            List<ChatEvent> events = new ArrayList<>();
+            if (note != null) {
+                events.add(new ChatEvent.Delta(note));
+            }
+            events.add(new ChatEvent.Citations(result.mode(), result.citations(), result.invalidIndices()));
+            events.add(new ChatEvent.Done(MessageStatus.OK, reportedUsage, elapsedMs(startNanos), firstTokenMs,
+                    check == null ? null : check.unverified()));
+            return events;
         }).flatMapIterable(Function.identity());
     }
 
@@ -146,7 +167,7 @@ public abstract class ChatRound {
             }
             return List.<ChatEvent>of(new ChatEvent.Delta(text),
                     new ChatEvent.Citations(result.mode(), result.citations(), result.invalidIndices()),
-                    new ChatEvent.Done(MessageStatus.OK, null, elapsedMs(startNanos), null));
+                    new ChatEvent.Done(MessageStatus.OK, null, elapsedMs(startNanos), null, null));
         }).flatMapIterable(Function.identity());
     }
 

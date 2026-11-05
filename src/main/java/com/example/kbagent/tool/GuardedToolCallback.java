@@ -134,24 +134,25 @@ public final class GuardedToolCallback<A extends Record> implements ToolCallback
         ctx.events().started(call.callId, tool.name(), maskedArgs);
         try {
             AgentTool.Output output = tool.execute(args, scope, ctx);
-            call.end(maskedArgs, scope, Decision.ALLOWED, true, output.summary(), null);
-            return resultMapper.writeValueAsString(output.result());
+            String result = output.result() instanceof String text ? text
+                    : resultMapper.writeValueAsString(output.result());
+            return call.end(maskedArgs, scope, Decision.ALLOWED, true, output.summary(), null, result);
         } catch (ScopeDeniedException e) {
             // 业务 Service 内的二次校验拒绝了（正常情况下第 4 步已经拦住）
-            call.end(maskedArgs, scope, Decision.DENIED, false, e.getMessage(), "FORBIDDEN_SCOPE");
-            return error("FORBIDDEN_SCOPE", e.getMessage());
+            return call.end(maskedArgs, scope, Decision.DENIED, false, e.getMessage(), "FORBIDDEN_SCOPE",
+                    error("FORBIDDEN_SCOPE", e.getMessage()));
         } catch (RateLimitedException e) {
-            call.end(maskedArgs, scope, Decision.ALLOWED, false, "触发限流", ErrorCode.RATE_LIMITED.name());
-            return error(ErrorCode.RATE_LIMITED.name(), "操作过于频繁，请 " + e.retryAfterSeconds() + " 秒后再试");
+            return call.end(maskedArgs, scope, Decision.ALLOWED, false, "触发限流", ErrorCode.RATE_LIMITED.name(),
+                    error(ErrorCode.RATE_LIMITED.name(), "操作过于频繁，请 " + e.retryAfterSeconds() + " 秒后再试"));
         } catch (BusinessException e) {
             Decision decision = e.errorCode() == ErrorCode.VALIDATION_FAILED ? Decision.INVALID : Decision.ALLOWED;
-            call.end(maskedArgs, scope, decision, false, e.getMessage(), e.errorCode().name());
-            return error(e.errorCode().name(), e.getMessage());
+            return call.end(maskedArgs, scope, decision, false, e.getMessage(), e.errorCode().name(),
+                    error(e.errorCode().name(), e.getMessage()));
         } catch (RuntimeException e) {
             log.warn("tool {} failed (traceId={}, callId={}): {}", tool.name(), ctx.traceId(), call.callId,
                     e.toString());
-            call.end(maskedArgs, scope, Decision.ALLOWED, false, "执行失败", "TOOL_ERROR");
-            return error("TOOL_ERROR", "工具执行失败，请稍后再试或换个问法");
+            return call.end(maskedArgs, scope, Decision.ALLOWED, false, "执行失败", "TOOL_ERROR",
+                    error("TOOL_ERROR", "工具执行失败，请稍后再试或换个问法"));
         }
     }
 
@@ -193,14 +194,15 @@ public final class GuardedToolCallback<A extends Record> implements ToolCallback
         /** 没有执行就结束：推送一对 START / END，写审计，返回结构化的错误。 */
         String reject(Map<String, Object> maskedArgs, Decision decision, String code, String message) {
             ctx.events().started(callId, tool.name(), maskedArgs);
-            end(maskedArgs, Set.of(), decision, false, message, code);
-            return error(code, message);
+            return end(maskedArgs, Set.of(), decision, false, message, code, error(code, message));
         }
 
-        void end(Map<String, Object> maskedArgs, Set<Region> scope, Decision decision, boolean ok, String summary,
-                 String errorCode) {
+        /** 写审计、推送 END 事件，返回交给模型的内容。 */
+        String end(Map<String, Object> maskedArgs, Set<Region> scope, Decision decision, boolean ok, String summary,
+                   String errorCode, String result) {
             long latencyMs = audit(maskedArgs, scope, decision, ok, summary, errorCode);
-            ctx.events().finished(callId, tool.name(), maskedArgs, decision, ok, latencyMs, summary);
+            ctx.events().finished(callId, tool.name(), maskedArgs, decision, ok, latencyMs, summary, result);
+            return result;
         }
 
         long audit(Map<String, Object> maskedArgs, Collection<Region> scope, Decision decision, boolean ok,

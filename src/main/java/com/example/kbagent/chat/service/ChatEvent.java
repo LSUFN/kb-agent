@@ -84,11 +84,13 @@ public sealed interface ChatEvent {
     }
 
     /**
-     * @param usage        没有调用模型（拒答）时为 null
-     * @param latencyMs    从开始处理到结束的总耗时
-     * @param firstTokenMs 从开始处理到收到模型第一个字的耗时；没有调用模型时为 null
+     * @param usage             没有调用模型（拒答）时为 null
+     * @param latencyMs         从开始处理到结束的总耗时
+     * @param firstTokenMs      从开始处理到收到模型第一个字的耗时；没有调用模型时为 null
+     * @param unverifiedNumbers 数字核对（{@link NumberGrounding}）找不到出处的数字；不做核对的模式（KB_QA）为 null
      */
-    record Done(MessageStatus status, Usage usage, long latencyMs, Integer firstTokenMs) implements ChatEvent {
+    record Done(MessageStatus status, Usage usage, long latencyMs, Integer firstTokenMs,
+                List<String> unverifiedNumbers) implements ChatEvent {
     }
 
     /** @param estimated 模型没有返回用量时按字数估算 */

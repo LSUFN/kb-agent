@@ -1,7 +1,6 @@
 package com.example.kbagent.tool;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import jakarta.validation.constraints.NotBlank;
@@ -18,7 +17,11 @@ import org.springframework.stereotype.Component;
 
 /**
  * searchKnowledgeBase：在用户有权访问的知识库中检索（所有角色可用）。
- * 结果按本轮的 {@link CitationRegistry} 全局编号，模型引用时使用返回的 index。
+ * 结果按本轮的 {@link CitationRegistry} 全局编号，模型引用时使用片段前面的序号。
+ * <p>
+ * 返回给模型的是纯文本，格式与 KB_QA 的参考资料相同（“[n] 《文件》第 p 页”，引用要求放在最后）。
+ * M4 实测：返回 JSON、把引用提醒放在一个字段里时，qwen-plus 仍有约一半的回答把原文的“第八条”写成 [8]；
+ * 同样的问题在 KB_QA 的格式下 15 次全部正确。
  */
 @Component
 public class KbSearchTool implements AgentTool<KbSearchTool.Args> {
@@ -28,10 +31,6 @@ public class KbSearchTool implements AgentTool<KbSearchTool.Args> {
             @NotBlank @Size(max = 500) @Sensitive String query,
             @ToolParam(required = false, description = "只在这个知识库中检索；不传则检索全部可访问的知识库")
             Long kbId) {
-    }
-
-    /** 返回给模型的一个片段。 */
-    public record Hit(int index, String filename, int page, String content) {
     }
 
     private final RetrievalService retrieval;
@@ -71,15 +70,23 @@ public class KbSearchTool implements AgentTool<KbSearchTool.Args> {
                 ? retrieval.retrieve(ctx.actor(), args.kbId(), args.query(), call)
                 : retrieval.retrieveIn(ctx.actor(), ctx.accessibleKbIds(), args.query(), call);
         List<Candidate> numbered = ctx.citations().register(found);
-        List<Hit> hits = numbered.stream()
-                .map(c -> new Hit(c.index(), c.filename(), c.pageNumber(), c.content().strip()))
-                .toList();
-        if (hits.isEmpty()) {
-            return new Output(Map.of("results", List.of(), "message", "知识库中没有找到相关内容"), "没有命中");
+        if (numbered.isEmpty()) {
+            return new Output("【检索结果】知识库中没有找到相关内容。", "没有命中");
         }
-        // 引用要求放在工具结果里再说一次：工具结果离模型的回答最近，比 System Prompt 更有效（M4 实测）
-        return new Output(Map.of("results", hits, "note", "回答中引用这些片段时，在句末标注 index，例如 ["
-                + hits.getFirst().index() + "]；不要使用原文中的条款号或页码（如“第九条”不能写成 [9]）"),
-                "命中 " + hits.size() + " 个片段");
+        return new Output(render(numbered), "命中 " + numbered.size() + " 个片段");
+    }
+
+    /** 与 KB_QA 的参考资料格式一致；引用要求放在最后，离模型的回答最近。 */
+    static String render(List<Candidate> numbered) {
+        StringBuilder text = new StringBuilder("【检索结果】（共 ").append(numbered.size()).append(" 条）\n");
+        for (Candidate c : numbered) {
+            text.append('[').append(c.index()).append("] 《").append(c.filename()).append("》第 ")
+                    .append(c.pageNumber()).append(" 页\n")
+                    .append(c.content().strip()).append("\n\n");
+        }
+        String example = "[" + numbered.getFirst().index() + "]";
+        return text.append("【引用要求】引用以上片段时，在句末标注片段前面的序号，例如 ").append(example)
+                .append("。方括号里只能写这个序号，不要写原文中的条款号或页码（例如“第九条”不能写成 [9]）。")
+                .toString();
     }
 }

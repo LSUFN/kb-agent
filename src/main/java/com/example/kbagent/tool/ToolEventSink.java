@@ -13,8 +13,11 @@ public interface ToolEventSink {
     /** @param args 已脱敏的参数 */
     void started(String callId, String tool, Map<String, Object> args);
 
+    /**
+     * @param result 返回给模型的内容（JSON）。不落库，agent 模块用它做数字核对的出处
+     */
     void finished(String callId, String tool, Map<String, Object> args, Decision decision, boolean ok,
-                  long latencyMs, String summary);
+                  long latencyMs, String summary, String result);
 
     ToolEventSink NOOP = new ToolEventSink() {
         @Override
@@ -23,7 +26,7 @@ public interface ToolEventSink {
 
         @Override
         public void finished(String callId, String tool, Map<String, Object> args, Decision decision, boolean ok,
-                             long latencyMs, String summary) {
+                             long latencyMs, String summary, String result) {
         }
     };
 }

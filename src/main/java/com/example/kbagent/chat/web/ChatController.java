@@ -113,7 +113,7 @@ public class ChatController {
         return new ChatReply(meta.messageId(), meta.userMessageId(), meta.traceId(), done.status(),
                 content.toString(), citations.mode(), citations.citations(), citations.invalidIndices(),
                 retrieval == null ? List.of() : retrieval.candidates(), toolSteps, done.usage(), done.latencyMs(),
-                done.firstTokenMs());
+                done.firstTokenMs(), done.unverifiedNumbers());
     }
 
     private static ErrorCode errorCode(String code) {
