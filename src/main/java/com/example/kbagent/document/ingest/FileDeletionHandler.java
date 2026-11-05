@@ -59,4 +59,9 @@ public class FileDeletionHandler implements TaskHandler {
         // 文档记录保留在 DELETING 状态并继续引用该文件，对账不会误删；需要管理员处理
         log.error("deleting the file of document {} failed permanently: {}", task.bizId(), errorCode);
     }
+
+    @Override
+    public void onManualRetry(long bizId) {
+        transactions.checkDeletionPending(bizId);
+    }
 }

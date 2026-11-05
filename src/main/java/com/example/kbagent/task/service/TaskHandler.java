@@ -26,4 +26,13 @@ public interface TaskHandler {
      */
     default void onGiveUp(ClaimedTask task, String errorCode, String userMessage) {
     }
+
+    /**
+     * 管理员手动重试 DEAD 任务时，在任务重新排队之前、同一个事务中回调，用于同步业务状态（例如文档 FAILED → PENDING）。
+     * 实现先锁业务对象，与其他流程“先锁业务行、再改任务表”的顺序一致。
+     * 业务对象已经不需要重试（已删除、已被重新处理）时抛出 {@link com.example.kbagent.common.error.BusinessException}，
+     * 整个重试回滚。
+     */
+    default void onManualRetry(long bizId) {
+    }
 }

@@ -2,7 +2,7 @@
 
 基于 Java 21 + Spring Boot 4.1 + Spring AI 2.0 的企业知识库问答（RAG）与业务分析 Agent 平台，作为 Java 后端工程实践作品。完整设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）、M3（知识库问答与会话）、M4（Agent 与工具）已完成（2026-11-05），下一阶段是 M5 前端。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
+> **当前进度：M0（工程骨架 + 技术验证）、M1（认证与权限）、M2（知识库与文档入库）、M3（知识库问答与会话）、M4（Agent 与工具）、M5（前端）已完成（2026-11-05），下一阶段是 M6 部署与文档。** 本 README 只描述已经落地的内容，各阶段完成后再逐步补充。
 
 ## 当前状态
 
@@ -17,7 +17,8 @@
 | 知识库与文档入库（M2） | ✅ 知识库与成员权限、PDF 上传（去重、补偿、对账）、`async_task` 任务表（并发领取、租约、fencing、重试）、中文切分、Embedding 入库、异步删除和重新处理；真实的 54 页 PDF 9.3 秒变为 READY |
 | 知识库问答（M3） | ✅ 检索调试接口、KB_QA 流程（检索不到时拒答且不调用模型）、SSE 事件协议、引用解析、会话与消息状态机、调用日志与脱敏；已用真实的 qwen-plus 和 text-embedding-v3 校准检索阈值和引用提示词 |
 | Agent 与工具（M4） | ✅ 4 个业务工具（知识库检索、订单统计、异常事件统计、生成报告）、服务端逐次鉴权与区域收敛、调用预算、工具审计、SSE 工具事件、报告生成与下载；通义流式分片回放测试通过；已用 qwen-plus 实测并改进 Agent 提示词 |
-| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 313 个，集成测试 75 个，不需要 API Key |
+| 前端（M5） | ✅ Vue 3 + TypeScript + Element Plus：登录与自动刷新 Token、知识库与文档、流式问答与引用、Agent 工具调用时间线、报告、系统管理（用户、调用日志、任务重试、统计概览）；已在浏览器中用真实模型走完整条演示流程 |
+| 测试 | ✅ `mvnw verify` 通过：单元 + 接口切片 + 架构测试 318 个，集成测试 80 个，不需要 API Key；前端 `npm test` 26 个 |
 | Spike S1–S5 | ✅ 已在真实通义接口上执行（14 个用例全部通过），结论见 [ARCHITECTURE.md §2.2](docs/ARCHITECTURE.md) |
 
 ### M0 技术验证的主要结论
@@ -182,11 +183,49 @@ event:done   data:{"status":"OK","usage":{"prompt":3844,"completion":380,"estima
   - 再把检索工具的结果改成与 KB_QA 相同的文本格式（“[n] 《文件》第 p 页”，引用要求放在最后）后，两组复测共 18/18。KB_QA 的 15/15 也复测了一遍，结果一致。
 - 数字核对上线后复测：分析员追问华北 3 次，模型都只说明无权查看、没有给出数字；正常的统计、检索、跨区对比回答都没有被误标。
 
+## 前端（M5）
+
+代码在 [frontend/](frontend/)：Vue 3 + TypeScript + Vite + Element Plus + Pinia。实现细节和浏览器实测记录见 [ARCHITECTURE.md §9.1](docs/ARCHITECTURE.md)。
+
+| 页面 | 功能 |
+|---|---|
+| 登录 | 登录后回到原来要访问的页面；Token 过期时自动刷新并重放请求，刷新失败回到登录页 |
+| 智能对话 | 左：会话列表（按时间分组、搜索、重命名、删除）。中：流式回答、Markdown、可点击的 `[n]` 角标、工具调用时间线、数字核对标签、停止生成、失败或中断后重新提问。右：引用面板（文档、页码、相似度、片段），与角标联动高亮 |
+| 知识库 | 列表、新建、编辑；文档表格（排队和处理中自动轮询，失败时显示原因并可重试）、拖拽上传、分片预览、检索调试、成员管理 |
+| 分析报告 | 列表、Markdown 预览、下载 |
+| 系统管理（ADMIN） | 用户（角色、区域范围、启用 / 停用）；调用日志（模型调用和工具调用，按 traceId 串联查看）；任务管理（重试 DEAD 任务）；统计概览 |
+
+为前端补齐的后端接口（§6.5 设计过，此前没有实现）：
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/admin/tasks?status=&type=` | ADMIN | 异步任务列表，`lastError` 已脱敏 |
+| POST | `/admin/tasks/{id}/retry` | ADMIN | 只能重试 DEAD 的任务：文档和任务一起回到排队状态，尝试次数清零；文档已经不需要重试时返回 409 |
+| GET | `/admin/metrics/overview?from=&to=` | ADMIN | 按 Asia/Shanghai 自然日聚合：对话调用次数、成功率、P50 / P95 延迟、首字延迟、Token 用量、工具调用次数和越权次数 |
+
+几个实现要点：
+- **刷新 Token 必须串行**：Refresh Token 被重复使用会撤销整个令牌族（M1）。同一页面内只发一个刷新请求，其他请求等它的结果；多个标签页之间用 Web Locks 互斥；别处刚刷新过时直接用新令牌重放。浏览器实测：并发 3 个请求同时 401，只刷新了 1 次，3 个请求都重放成功。
+- **SSE 绝不自动重连**：fetch-event-source 默认会在出错时重试，并在页面隐藏时断开、可见时重连，对提问接口来说都等于把问题再提交一遍，这两个行为都关掉了。开始输出之前的 401 会刷新一次 Token 再重新发起。
+- **模型输出防 XSS**：markdown-it 关闭 HTML，渲染结果再经过 DOMPurify。`[n]` 角标的识别规则与后端 `CitationParser` 一致，代码里的不算。
+- **流式渲染**：`delta` 用 `requestAnimationFrame` 合并，每帧最多重新渲染一次 Markdown。
+- 前端不包含任何模型地址或 Key。菜单和路由按角色控制只是为了体验，权限以后端为准。
+
+启动前端（先启动后端）：
+
+```powershell
+cd frontend
+npm install
+npm run dev        # 打开 http://localhost:5173，/api 会代理到 http://localhost:8080
+```
+
+后端不在 8080 端口时，在 `frontend/.env.development.local`（已被忽略）中写入 `VITE_PROXY_TARGET=http://localhost:<端口>`。演示账号与后端相同（admin / analyst / user，密码是 `.env` 中的 `DEMO_USER_PASSWORD`）。
+
 ## 环境要求
 
 - JDK 21
 - Maven：不需要单独安装，项目自带 Maven Wrapper（`mvnw.cmd`），首次运行时会自动下载 Maven 3.9.11
 - Docker Desktop（运行基础设施和集成测试时需要）
+- Node.js 22.12 或更高版本（运行前端时需要）
 
 ## 快速开始
 
@@ -205,6 +244,11 @@ docker compose ps        # 两个服务都应显示 healthy
 # 4. 冒烟检查
 curl http://localhost:8080/actuator/health
 curl -i http://localhost:8080/api/v1/system/ping
+
+# 5. 启动前端，然后在浏览器打开 http://localhost:5173
+cd frontend
+npm install
+npm run dev
 ```
 
 登录并查看当前用户（PowerShell，把 `<密码>` 换成 `.env` 里的 `DEMO_USER_PASSWORD`）：
@@ -216,7 +260,7 @@ Invoke-RestMethod http://localhost:8080/api/v1/users/me -Headers @{ Authorizatio
 
 ### 手动测试接口
 
-[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、检索调试、问答（流式和非流式）、拒答、历史消息、调用日志、Agent 工具调用（含越权）、报告下载、工具审计、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
+[http/kb-agent.http](http/kb-agent.http) 是 IntelliJ IDEA 自带 HTTP Client 的请求脚本，覆盖登录、知识库、上传 PDF、查看入库进度和切分结果、权限、检索调试、问答（流式和非流式）、拒答、历史消息、调用日志、Agent 工具调用（含越权）、报告下载、工具审计、统计概览、任务管理、刷新、删除、登出。配套的中文示例文档是 [http/sample-travel-policy.pdf](http/sample-travel-policy.pdf)（虚构的差旅制度）。
 
 1. 启动基础设施和后端（见上文）。文档入库和问答都要调用通义，需要先在 `.env` 中填写 `AI_API_KEY`。
 2. 在 `http/` 目录创建 `http-client.private.env.json`（已被 `.gitignore` 忽略）：`{ "local": { "password": "<.env 中的 DEMO_USER_PASSWORD>" } }`。
@@ -252,6 +296,14 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 ```
 
 `verify` 不需要任何 API Key。测试使用 `test` profile（`src/test/resources/application-test.yml`），其中的 JWT 密钥只用于测试。
+
+前端：
+
+```powershell
+cd frontend
+npm test           # 单元测试（Vitest + jsdom），不需要后端
+npm run build      # 类型检查（vue-tsc）+ 打包
+```
 
 ## M0 验收清单（2026-11-04 在本机执行完毕）
 
@@ -299,11 +351,20 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 - [x] 真实模型端到端：qwen-plus 完成本区统计、拒绝越权、生成报告、跨区对比、知识库检索加引用；提示词和检索结果格式按实测改进（见上文）
 - [x] 数字核对：模型不调用工具直接给出的数字会被标出，追加提示并写入 `unverifiedNumbers`；来自工具结果的数字和可由结果推算的占比不会被误标；含未核实数字的轮次不进入后续历史（`NumberGroundingTest`、`AgentIT`，以及 qwen-plus 复测）
 
+## M5 验收清单（2026-11-05 在本机执行完毕）
+
+- [x] 在浏览器里完成整条演示流程，不借助 Postman（qwen-plus + text-embedding-v3）：新建知识库 → 上传 PDF（自动轮询到“可用”）→ 分片预览、检索调试 → 知识库问答（流式输出、`[1]` 角标与引用面板联动）→ Agent 分析（工具调用时间线、数字核对）→ 生成报告、预览、下载 → 管理员查看调用日志（按 traceId 串联出 1 次模型调用和 3 次工具调用）
+- [x] Token 过期：并发 3 个请求同时 401，只刷新 1 次，全部重放成功；流式接口 401 时刷新后重新发起（浏览器实测，以及 `http.spec.ts`、`chatStream.spec.ts`）
+- [x] 停止生成：页面显示“已停止生成”；刷新页面后，历史消息保留已生成的部分和工具步骤，状态为中断
+- [x] 角色：普通员工看不到系统管理菜单，直接访问后台地址进入 403 页；后台接口对非 ADMIN 返回 403（接口切片测试）
+- [x] 前端单元测试 26 个（`npm test`）：XSS 过滤、引用角标规则、SSE 事件合并、串行刷新 Token、流式接口的错误处理、文件名解析、会话分组
+- [x] 新增管理接口：DEAD 任务重试后文档变为可用、非 DEAD 任务返回 409、文档已被重新处理时整体回滚（`AdminTaskIT`）；统计按 Asia/Shanghai 自然日分组、百分位、合计行、补零（`MetricsQueryServiceIT`）；非 ADMIN 返回 403（接口切片测试）
+
 ## 目录结构
 
 ```
 .
-├── docs/ARCHITECTURE.md        架构设计（v0.2.6）
+├── docs/ARCHITECTURE.md        架构设计（v0.2.9）
 ├── docker-compose.yml          基础设施
 ├── .env.example                环境变量模板
 ├── pom.xml
@@ -319,21 +380,29 @@ netsh interface ipv4 show excludedportrange protocol=tcp
 │   ├── knowledge               知识库、成员、访问级别判断（KbPermissionService）
 │   ├── document                文档上传、删除、重新处理；入库流水线（PDF 解析、切分、Embedding）
 │   ├── storage                 文件存储（本地实现）与孤儿文件对账
-│   ├── task                    通用异步任务：扫描、领取、租约、fencing、重试
+│   ├── task                    通用异步任务：扫描、领取、租约、fencing、重试；管理员查看和重试 DEAD 任务
 │   ├── retrieval               带权限过滤的向量检索、检索调试接口
 │   ├── chat                    会话与消息、问答分发与通用流程（ChatRound）、KB_QA、SSE、引用解析、超时收尾
 │   ├── agent                   AGENT 模式：组装带工具的请求、注入服务端上下文、合并工具事件和模型输出
 │   ├── tool                    4 个工具、GuardedToolCallback、ToolPolicy、调用预算、引用编号表、工具解析器
 │   ├── business                订单和异常事件的只读统计（固定的参数化 SQL）、区域范围规则
 │   ├── report                  报告生成（确定性 Markdown）、查看和下载
-│   ├── observability           脱敏（SensitiveDataMasker、Logback 转换器）、模型调用日志、日志查询与清理
+│   ├── observability           脱敏（SensitiveDataMasker、Logback 转换器）、模型调用日志、日志查询与清理、统计概览
 │   └── system/web              冒烟接口
 ├── src/main/resources
 │   ├── application.yml
 │   ├── application-local.yml   本地开发 profile（读取 .env，创建演示账号）
 │   ├── logback-spring.xml      应用日志脱敏（消息和异常堆栈）
-│   └── db/migration             V1 建表，V2 演示业务数据
+│   └── db/migration             V1 建表，V2 演示业务数据，V3 数字核对结果
 ├── src/test/java/...           单元测试、接口切片测试、ArchUnit、集成测试
+├── frontend/                   前端（Vue 3 + TypeScript + Vite + Element Plus）
+│   └── src
+│       ├── api                 Axios 实例（401 自动刷新）、各模块接口、SSE（fetch-event-source）
+│       ├── types               api.ts 与后端 DTO 对应，sse.ts 与 SSE 事件对应，chat.ts 是消息模型和事件合并
+│       ├── stores              Pinia：auth、conversation、chatStream
+│       ├── utils               Markdown 渲染（引用角标、DOMPurify）、令牌存储、格式化、标签
+│       ├── layouts / views     后台布局；登录、对话、知识库、报告、系统管理
+│       └── components          Markdown 视图、报告预览抽屉
 ├── http/                       手动测试脚本（IntelliJ HTTP Client）和示例 PDF
 └── spikes/                     M0 技术验证（独立 Maven 工程，结论见 ARCHITECTURE.md §2.2）
 ```

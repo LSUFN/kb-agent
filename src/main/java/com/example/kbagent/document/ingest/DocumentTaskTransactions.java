@@ -3,6 +3,8 @@ package com.example.kbagent.document.ingest;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.example.kbagent.common.error.BusinessException;
+import com.example.kbagent.common.error.ErrorCode;
 import com.example.kbagent.document.domain.Document;
 import com.example.kbagent.document.domain.DocumentStatus;
 import com.example.kbagent.document.repository.DocChunkRepository;
@@ -11,6 +13,7 @@ import com.example.kbagent.document.repository.DocumentRepository;
 import com.example.kbagent.task.service.TaskContext;
 import com.example.kbagent.task.service.TaskExceptions.NonRetryableTaskException;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -73,6 +76,27 @@ public class DocumentTaskTransactions {
         documents.findByIdForUpdate(documentId)
                 .filter(doc -> doc.status() == DocumentStatus.PENDING || doc.status() == DocumentStatus.PROCESSING)
                 .ifPresent(doc -> doc.markFailed(errorCode, userMessage));
+    }
+
+    /** 管理员重试 DEAD 的入库任务：只有 FAILED 的文档需要重新排队。 */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void requeueForManualRetry(long documentId) {
+        Document doc = documents.findByIdForUpdate(documentId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.CONFLICT, "文档已被删除，不需要重试"));
+        if (doc.status() != DocumentStatus.FAILED) {
+            throw new BusinessException(ErrorCode.CONFLICT, "文档当前状态为 " + doc.status() + "，不需要重试");
+        }
+        doc.requeue();
+    }
+
+    /** 管理员重试 DEAD 的删除任务：文档记录必须还在 DELETING 状态（文件还没删掉）。 */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void checkDeletionPending(long documentId) {
+        Document doc = documents.findByIdForUpdate(documentId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.CONFLICT, "文档已经删除完成，不需要重试"));
+        if (doc.status() != DocumentStatus.DELETING) {
+            throw new BusinessException(ErrorCode.CONFLICT, "文档当前状态为 " + doc.status() + "，不需要重试");
+        }
     }
 
     /** 文件已删除：完成任务并删除文档记录（chunk 由外键级联删除）。 */

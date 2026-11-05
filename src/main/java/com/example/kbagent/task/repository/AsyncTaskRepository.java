@@ -4,11 +4,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import com.example.kbagent.task.domain.ClaimedTask;
+import com.example.kbagent.task.domain.TaskRecord;
 import com.example.kbagent.task.domain.TaskSnapshot;
 import com.example.kbagent.task.domain.TaskStatus;
 import com.example.kbagent.task.domain.TaskType;
@@ -145,6 +147,72 @@ public class AsyncTaskRepository {
                         TaskStatus.valueOf(rs.getString("status")), rs.getInt("attempt"), rs.getInt("max_attempts"),
                         rs.getObject("next_run_at", OffsetDateTime.class).toInstant(), rs.getString("last_error")))
                 .optional();
+    }
+
+    // ---------- 管理端（§6.5） ----------
+
+    private static final String RECORD_COLUMNS =
+            "id, task_type, biz_id, status, attempt, max_attempts, last_error, next_run_at, created_at, updated_at";
+
+    public Optional<TaskRecord> findById(long id) {
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM async_task WHERE id = :id")
+                .param("id", id)
+                .query(AsyncTaskRepository::mapRecord)
+                .optional();
+    }
+
+    /** 按 id 倒序分页；status、type 为 null 表示不过滤。 */
+    public List<TaskRecord> findPage(TaskStatus status, TaskType type, int offset, int limit) {
+        Map<String, Object> params = new HashMap<>();
+        String where = filter(status, type, params);
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM async_task" + where
+                        + " ORDER BY id DESC OFFSET :offset LIMIT :limit")
+                .params(params)
+                .param("offset", offset)
+                .param("limit", limit)
+                .query(AsyncTaskRepository::mapRecord)
+                .list();
+    }
+
+    public long count(TaskStatus status, TaskType type) {
+        Map<String, Object> params = new HashMap<>();
+        return jdbc.sql("SELECT count(*) FROM async_task" + filter(status, type, params))
+                .params(params)
+                .query(Long.class)
+                .single();
+    }
+
+    /**
+     * 人工重试：DEAD 的任务重新排队，尝试次数清零（重新获得完整的重试次数），保留 last_error 作为上次失败的原因。
+     * 返回 false 表示任务已经不是 DEAD（例如被并发重试）。
+     * 同一业务对象已有活跃任务时违反 uk_task_active，抛出 DuplicateKeyException。
+     */
+    public boolean requeueDead(long id) {
+        return jdbc.sql("UPDATE async_task SET status = 'PENDING', attempt = 0, next_run_at = now(), locked_by = NULL, "
+                        + "lease_until = NULL, updated_at = now() WHERE id = :id AND status = 'DEAD'")
+                .param("id", id)
+                .update() == 1;
+    }
+
+    private static String filter(TaskStatus status, TaskType type, Map<String, Object> params) {
+        StringBuilder where = new StringBuilder(" WHERE 1 = 1");
+        if (status != null) {
+            where.append(" AND status = :status");
+            params.put("status", status.name());
+        }
+        if (type != null) {
+            where.append(" AND task_type = :type");
+            params.put("type", type.name());
+        }
+        return where.toString();
+    }
+
+    private static TaskRecord mapRecord(ResultSet rs, int rowNum) throws SQLException {
+        return new TaskRecord(rs.getLong("id"), TaskType.valueOf(rs.getString("task_type")), rs.getLong("biz_id"),
+                TaskStatus.valueOf(rs.getString("status")), rs.getInt("attempt"), rs.getInt("max_attempts"),
+                rs.getString("last_error"), rs.getObject("next_run_at", OffsetDateTime.class).toInstant(),
+                rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                rs.getObject("updated_at", OffsetDateTime.class).toInstant());
     }
 
     private static Map<String, Object> fence(ClaimedTask task) {

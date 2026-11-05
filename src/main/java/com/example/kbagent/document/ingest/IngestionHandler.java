@@ -89,6 +89,11 @@ public class IngestionHandler implements TaskHandler {
         transactions.failIngestion(task.bizId(), errorCode, userMessage);
     }
 
+    @Override
+    public void onManualRetry(long bizId) {
+        transactions.requeueForManualRetry(bizId);
+    }
+
     private List<PageText> readPages(String storagePath) {
         try (InputStream in = storage.open(storagePath)) {
             return extractor.extract(in);

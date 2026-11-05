@@ -187,7 +187,15 @@ Authorization: Bearer {{analystToken}}
 GET {{baseUrl}}/api/v1/admin/logs/tool-calls?page=1&size=20
 Authorization: Bearer {{adminToken}}
 
-### 28. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
+### 28. 统计概览（管理员）：最近 7 天按天聚合的对话调用次数、成功率、P50/P95 延迟、首字延迟、Token 用量、工具调用和越权次数
+GET {{baseUrl}}/api/v1/admin/metrics/overview
+Authorization: Bearer {{adminToken}}
+
+### 29. 重试耗尽的异步任务（管理员）：通常为空；对其中一个执行 POST /api/v1/admin/tasks/{id}/retry 可以让它重新排队
+GET {{baseUrl}}/api/v1/admin/tasks?status=DEAD
+Authorization: Bearer {{adminToken}}
+
+### 30. 刷新令牌：旧的 Refresh Token 立即失效（再用旧的刷新一次，会撤销这次登录的全部令牌）
 POST {{baseUrl}}/api/v1/auth/refresh
 Content-Type: application/json
 
@@ -198,15 +206,15 @@ Content-Type: application/json
     client.global.set("adminRefresh", response.body.data.refreshToken);
 %}
 
-### 29. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
+### 31. 删除文档：返回 202，异步删除文件和记录；稍后再执行 5 会返回 404
 DELETE {{baseUrl}}/api/v1/documents/{{docId}}
 Authorization: Bearer {{adminToken}}
 
-### 30. 用户列表（管理员）
+### 32. 用户列表（管理员）
 GET {{baseUrl}}/api/v1/admin/users?page=1&size=20
 Authorization: Bearer {{adminToken}}
 
-### 31. 登出：之后用旧 token 执行 2 会返回 401
+### 33. 登出：之后用旧 token 执行 2 会返回 401
 POST {{baseUrl}}/api/v1/auth/logout
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json

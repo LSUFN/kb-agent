@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.7（2026-11-05）· **状态：M0–M4 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M4 的验收标准已验证（§4.8–§4.11）。M5 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.9（2026-11-05）· **状态：M0–M5 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M5 的验收标准已验证（§4.8–§4.11、§9.1）。M6 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> v0.2.9 变更：M5 落地，新增 §9.1。包括：前端工程 `frontend/`；实现 §6.5 中的 `/admin/tasks`（DEAD 任务重新排队时复用同一行）和 `/admin/metrics/overview`（延迟只统计对话调用）；`TaskHandler` 新增 `onManualRetry` 回调。
 > v0.2.8 变更：数字核对的结果写入 `chat_message.unverified_numbers`（Flyway V3）；组装对话历史时跳过含有未核实数字的轮次（§4.11）。
 > v0.2.7 变更：M4 补充（§4.11）：AGENT 回答结束后做数字核对，`done` 事件新增 `unverifiedNumbers`；检索工具的结果改为与 KB_QA 相同的文本格式；更正 v0.2.6 中不可复现的“9/9”实测结果。
 > v0.2.6 变更：M4 落地，新增 §4.11。包括：工具改为强类型的 `AgentTool` + 参数 record（同时用于 JSON Schema、校验和脱敏）；`AgentRequestContext`、`CitationRegistry`、`ToolRegistry` 放在 tool 包，避免 agent ↔ tool 循环依赖；开启 Spring AI 2.0.2 默认关闭的工具名解析回退，让越权调用走到服务端校验；用真实模型改进 Agent 提示词（2/6 → 9/9）。
@@ -910,8 +911,8 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 |---|---|---|---|
 | GET | `/reports` · `/reports/{id}` · `/reports/{id}/download` | 本人 / ADMIN | 下载格式为 `text/markdown` |
 | GET | `/admin/logs/llm-calls` · `/admin/logs/tool-calls` | ADMIN | 支持按 traceId、用户、时间、成败、decision 过滤；返回的都是脱敏后的数据 |
-| GET | `/admin/metrics/overview?from&to` | ADMIN | 按天聚合：调用次数、成功率、P50/P95 延迟、首字延迟、Token 用量 |
-| GET | `/admin/tasks?status=` · POST `/admin/tasks/{id}/retry` | ADMIN | 查看 DEAD 状态的任务并手动重试 |
+| GET | `/admin/metrics/overview?from&to` | ADMIN | 按天聚合：调用次数、成功率、P50/P95 延迟、首字延迟、Token 用量（M5 实现，见 §9.1） |
+| GET | `/admin/tasks?status=` · POST `/admin/tasks/{id}/retry` | ADMIN | 查看 DEAD 状态的任务并手动重试（M5 实现，见 §9.1） |
 | GET | `/actuator/health` · `/actuator/prometheus` | health 公开；prometheus 只对内网开放 | |
 
 ---
@@ -956,7 +957,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | **M2 知识库与入库** ✅ 2026-11-04 完成 | 知识库和成员；StorageService；上传和删除流程；`async_task` 扫描、领取、租约、重试；切分器；Embedding；对账任务 | §7 中入库、补偿、任务恢复、事务边界、删除竞争相关的集成测试全部通过；一份真实的 20 页 PDF 能在合理时间内变为 READY |
 | **M3 KB_QA 与会话** ✅ 2026-11-05 完成 | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
 | **M4 Agent 与工具** ✅ 2026-11-05 完成 | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
-| **M5 前端** | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
+| **M5 前端** ✅ 2026-11-05 完成 | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
 | **M6 部署与文档** | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
 | P1（MVP 之后） | 离线评测（§4.5 层次 B）；GitHub Actions CI；混合检索 / Rerank；问题改写；指标看板 | 评测结果来自真实运行 |
 | P2 | 测井异常诊断模块（§10） | |
@@ -985,6 +986,84 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 - SSE 用 `@microsoft/fetch-event-source` 发起请求，因为它支持 POST 方法和 `Authorization` 请求头，原生的 EventSource 不支持。
 - 事件类型在 `types/sse.ts` 中与后端协议一一对应。
 - 状态管理用 Pinia：`auth`、`conversation`、`chatStream` 三个 store。
+
+### 9.1 M5 实现说明
+
+前端工程位于 `frontend/`：Vue 3.5 + TypeScript 6 + Vite 8 + Element Plus 2.14（全量引入，中文语言包）+ Pinia 4 + Vue Router 5，单元测试用 Vitest + jsdom。开发时 Vite 把 `/api` 代理到后端，后端不需要配置 CORS；M6 由 Nginx 做同样的事。
+
+**目录**：
+- `api/`：Axios 实例和拦截器、各模块接口、SSE。
+- `types/`：`api.ts` 与后端 DTO 一一对应；`sse.ts` 与 `ChatEvent` 一一对应；`chat.ts` 是页面上的消息模型，以及把 SSE 事件合并到消息上的纯函数（便于单元测试）。
+- `stores/`：`auth`、`conversation`、`chatStream` 三个 Pinia store。
+- `utils/`：Markdown 渲染、令牌存储、格式化、枚举的中文标签。
+
+**令牌与刷新**（§4.8 要求前端串行刷新）：
+- 令牌保存在 localStorage，刷新页面后保持登录，多个标签页共享。取舍：页面脚本能读到令牌，所以模型输出一律经过 `html:false` 和 DOMPurify。改用 httpOnly Cookie 需要后端配合（CSRF、SameSite），留到以后。
+- 只有错误码为 `UNAUTHORIZED` 的 401 才刷新，并且只刷新一次再重放；`BAD_CREDENTIALS`、`ACCOUNT_DISABLED`、`REFRESH_TOKEN_INVALID` 不刷新。账号停用或刷新失败时清空本地令牌，跳到登录页并带上 `redirect`。
+- 串行刷新有三层：
+  1. 同一页面内 single-flight：所有 401 的请求共享同一个刷新 Promise。
+  2. 多个标签页之间用 Web Locks（`navigator.locks`）互斥。
+  3. 拿到锁之后，先比较失败请求携带的令牌和当前令牌：不同说明别处刚刷新过，直接用新令牌重放，不再刷新。
+- 浏览器实测：并发 3 个请求同时 401，只发出 1 次刷新，3 个请求都重放成功。
+- 其他标签页登出时，通过 `storage` 事件同步回到登录页。
+
+**SSE**：
+- 用 `@microsoft/fetch-event-source` 发 POST，带 Authorization 头。它默认会在出错时自动重试，并在页面隐藏时断开、可见时重连。对提问接口来说，这两种行为都等于把问题再提交一遍，所以设置了 `openWhenHidden: true`，并在 `onerror` 里直接抛出，不重试。
+- 开始输出之前的错误是普通 JSON（§6.4），在 `onopen` 里转换成 `ApiError`；其中 401 会先刷新一次 Token 再重新发起。流开始之后服务端不再鉴权，输出过程中 Token 过期不影响。
+- 停止生成就是 `AbortController.abort()`。前端立即把消息标记为已停止；服务端感知断开后保存已生成的部分，消息为 INTERRUPTED。“重新提问”是把上一条问题再发一次，后端没有单独的重新生成接口。
+- 同一时刻只允许一轮流式问答。切到别的会话时，这一轮在后台继续；切回来时，用内存中的实时消息替换服务端的占位消息。
+
+**渲染**：
+- `delta` 用 `requestAnimationFrame` 合并，每帧最多重新渲染一次 Markdown。其他事件到达时，先把缓冲的文本写入，保证顺序。
+- Markdown：markdown-it（`html:false`）→ DOMPurify → highlight.js（只注册常用的 9 种语言）。链接一律在新窗口打开，并带 `noopener noreferrer`。
+- `[n]` 角标由 markdown-it 的 core 规则生成，识别规则与后端 `CitationParser` 一致：半角、全角方括号和【】，多个编号用逗号、顿号或空白分隔。行内代码和代码块里的编号不是 text token，天然不会被识别。
+- 流式输出中引用还没确定，编号显示为灰色的待定角标。收到 `citations` 之后，只有合法编号可以点击，`invalidIndices` 按普通文本显示。回答中的角标、右侧的引用卡片、回答下方的引用标签三者联动高亮。
+- 工具时间线按 `callId` 合并 START 和 END。只有 END 没有 START（例如参数不合法）也会显示；本轮结束时还没收到 END 的步骤不再显示“进行中”。状态分为进行中、成功、执行失败、无权限已拒绝、参数不合法、超出调用预算；参数显示的是服务端已脱敏的内容。
+- 报告工具的摘要形如“已生成报告 #12：…”，前端据此在回答下方显示“查看报告 #12”，可以预览和下载。
+- AGENT 回答有未核实数字时显示警告标签，数字列表在悬浮提示里；回答末尾的核对说明来自后端。调用过工具且没有未核实数字时显示“数字核对通过”。
+- 管理员在每条回答下方能看到 traceId 链接，点击跳到调用日志的串联视图。
+
+**为 M5 补齐的后端接口**（§6.5 设计过，此前没有实现）：
+- `GET /admin/tasks?status=&type=`：脱敏后的 `last_error` 只给管理员看。
+- `POST /admin/tasks/{id}/retry`：只能重试 DEAD 的任务。
+  - 实现上是把同一行改回 PENDING、尝试次数清零，而不是新建一行。这样 DEAD 列表自然变短，管理员也能用同一个任务 ID 跟踪结果。
+  - 加锁顺序与其他流程一致：先由 `TaskHandler.onManualRetry` 锁定业务对象并同步状态，再改任务表。入库任务要求文档是 FAILED，并把它改回 PENDING；删除任务要求文档仍是 DELETING。
+  - 业务对象已经不需要重试（例如文档已被所有者重新处理）时返回 409，整个事务回滚。
+- `GET /admin/metrics/overview?from&to`：
+  - 按业务时区（Asia/Shanghai）的自然日聚合，一次最多 92 天，没有数据的日子补零。
+  - 延迟和首字延迟只统计对话调用（CHAT），向量化调用只计次数，否则百分位会被几十毫秒的 Embedding 调用拉低。
+  - 百分位用 `percentile_cont`。合计行用 `GROUPING SETS` 在同一条 SQL 里算出，因为百分位不能由每天的百分位推出。
+  - `toolDenied` 只统计 DENIED（越权尝试），不含参数不合法和超出预算。
+
+**测试**：
+- 前端单元测试 26 个（`npm test`）：
+  - XSS 过滤和链接属性；角标规则（合法、不合法、混合、代码块、待定）。
+  - SSE 事件合并，包括只有 END 的工具调用和 error 事件。
+  - 串行刷新：并发 401 只刷新一次、别处已刷新时不再刷新、刷新失败、账号停用、登录接口不刷新。
+  - 流式接口：事件解析、忽略心跳、限流错误、401 刷新后重新发起、中途断开时不重试。
+  - 下载文件名解析、会话按时间分组。
+- 后端：`AdminTaskIT`、`MetricsQueryServiceIT`，以及两个接口切片测试。
+
+**浏览器实测**（2026-11-05，Vite 开发服务器代理到本机后端，qwen-plus + text-embedding-v3，使用临时创建的三个角色的测试账号，测试后已停用）：
+- 分析员新建知识库，上传示例 PDF：3 页、3 个分片，约 3 秒内变为可用。分片预览正常；检索调试的 3 个结果都超过 0.50 阈值。
+- 知识库问答：1.8 秒完成，首字 1.0 秒；回答带 `[1]` 角标，点击后右侧卡片和下方标签同时高亮。
+- Agent：
+  - 订单统计调用耗时 38 ms，回答限定在华东，并说明其他区域无权查看。
+  - 生成报告调用耗时 73 ms；“查看报告 #4”能预览，下载得到中文文件名的 `.md` 文件。
+  - 问华北时，模型直接说明无权查看，没有给出数字。
+- 停止生成：保留了 3 次工具调用和已生成的部分；刷新页面后，历史消息显示为中断状态。
+- 管理员：调用日志按 traceId 串联出 1 次模型调用和 3 次工具调用；统计概览、任务管理、用户管理（停用账号）正常。
+- 普通员工看不到系统管理菜单，直接访问后台地址进入 403 页。
+- 实测中修正的问题：
+  - AGENT 回答没有引用时（`citationMode` 为 NONE），页面误显示 KB_QA 的“知识库中没有相关资料，未调用模型”。
+  - 值为空字符串的“全部”选项，在 Element Plus 中会显示成占位符。
+
+**已知问题**：
+- qwen-plus 有时在调用工具之前，先输出自己的权限分析和调用计划（例如“用户仅可查看华东……需调用 queryOrderStats……”），这段文字会出现在回答里。要解决需要调整 Agent 提示词，并重新实测引用和数字核对，本阶段没有改。
+- 工具时间线放在回答文本上方，不保留文本和工具调用的先后顺序；历史消息里也没有保存这个顺序。
+- Element Plus 全量引入，主包约 876 KB（gzip 后 279 KB），按需引入留到以后。
+- 同一时刻只能进行一轮流式问答。
+- 知识库所有者添加成员时，需要输入对方的用户 ID，因为只有管理员能查询用户列表。
 
 ---
 
