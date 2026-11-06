@@ -7,6 +7,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** 数字核对：回答中的数字必须能在本轮的查询结果中找到出处。 */
 class NumberGroundingTest {
@@ -50,6 +51,28 @@ class NumberGroundingTest {
         assertThat(result.unverified()).containsExactly("12.5", "88");
         assertThat(result.noEvidence()).isFalse();
         assertThat(NumberGrounding.note(result)).contains("可能是模型计算或推测得出的").contains("12.5、88");
+    }
+
+    /** 实测：工具返回平均处理 378.06 分钟，模型写成“约 6.3 小时”“约 6 小时 18 分钟”，曾被误标为未核实。 */
+    @ParameterizedTest
+    @ValueSource(strings = {"平均处理时长 378.06 分钟（约 6.3 小时）。", "平均约 6 小时 18 分钟。", "平均约 6 小时。",
+            "平均 6.30 小时。"})
+    void hoursConvertedFromMinutesInTheResultsAreVerified(String answer) {
+        String anomalyResult = """
+                {"rows":[{"key":"EAST","eventCount":76,"unresolvedCount":11,"avgResolveMinutes":378.06}]}""";
+
+        NumberGrounding.Result result = NumberGrounding.check(answer, "异常事件处理多久", List.of(anomalyResult));
+
+        assertThat(result.unverified()).isEmpty();
+    }
+
+    @Test
+    void hoursAreOnlyComparedWithMinuteValues() {
+        // 9 小时 = 540 分钟，与 378.06 分钟对不上；334 单换算成分钟（约 5.6 小时）也不算出处
+        NumberGrounding.Result result = NumberGrounding.check("平均约 9 小时，另有约 5.6 小时。", "",
+                List.of("{\"orderCount\":334,\"avgResolveMinutes\":378.06}"));
+
+        assertThat(result.unverified()).containsExactly("9", "5.6");
     }
 
     @Test

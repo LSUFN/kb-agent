@@ -28,6 +28,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
 /**
@@ -49,9 +50,20 @@ public class ChatTransactions {
                        long answerMessageId, List<HistoryRound> history) {
     }
 
-    /** 一轮完整的历史问答。 */
-    public record HistoryRound(String question, String answer) {
+    /**
+     * 一轮完整的历史问答。
+     *
+     * @param toolSteps 这一轮执行的工具调用（AGENT 模式）；没有时为空列表
+     */
+    public record HistoryRound(String question, String answer, List<ToolStep> toolSteps) {
+
+        public HistoryRound(String question, String answer) {
+            this(question, answer, List.of());
+        }
     }
+
+    private static final TypeReference<List<ToolStep>> TOOL_STEP_LIST = new TypeReference<>() {
+    };
 
     private final ConversationRepository conversations;
     private final ChatMessageRepository messages;
@@ -172,7 +184,9 @@ public class ChatTransactions {
             if (question.role() == MessageRole.USER && answer.role() == MessageRole.ASSISTANT
                     && answer.status() == MessageStatus.OK) {
                 if (!answer.hasUnverifiedNumbers()) {
-                    history.add(new HistoryRound(question.content(), answer.content()));
+                    List<ToolStep> steps = answer.toolSteps() == null ? List.of()
+                            : objectMapper.readValue(answer.toolSteps(), TOOL_STEP_LIST);
+                    history.add(new HistoryRound(question.content(), answer.content(), steps));
                 }
                 i++;
             }

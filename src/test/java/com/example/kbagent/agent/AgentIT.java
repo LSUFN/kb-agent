@@ -35,6 +35,7 @@ import com.example.kbagent.user.repository.SysUserRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -197,6 +198,64 @@ class AgentIT {
         assertThat(items.get(1).path("unverifiedNumbers").get(0).asString()).isEqualTo("127");
         assertThat(items.get(3).path("unverifiedNumbers").isArray()).isTrue();
         assertThat(items.get(3).path("unverifiedNumbers").size()).isZero();
+    }
+
+    /**
+     * 实测：历史里只有“问题 + 回答”时，追问相关的制度问题（先问住宿标准，再问报销补助），
+     * 模型 5 次都没有检索、直接编了一段制度。历史里保留当时的工具调用后不再出现。
+     */
+    @Test
+    void historyKeepsTheToolCallsOfEarlierRounds() {
+        User user = newUser(Role.USER);
+        Kb kb = ChatFixtures.readyKnowledgeBase(api, user, "PRIVATE", 1);
+        long conversationId = agentConversation(user, kb.kbId());
+        String path = ChatFixtures.streamPath(conversationId);
+        String query = "住宿标准" + UUID.randomUUID();
+        embeddings.alias(query, kb.page(1).content());
+        chatModel.script(callTool("searchKnowledgeBase", "{\"query\":\"" + query + "\"}"),
+                answerWith("住宿标准见制度[1]。"), answerWith("好的。"));
+
+        api.stream(path, user, body("出差住宿标准是多少？"));
+        api.stream(path, user, body("报销补助呢？"));
+
+        List<Message> prompt = chatModel.lastPrompt().getInstructions();
+        assertThat(prompt).extracting(Message::getMessageType).containsExactly(MessageType.SYSTEM, MessageType.USER,
+                MessageType.ASSISTANT, MessageType.TOOL, MessageType.ASSISTANT, MessageType.USER);
+        // 上一轮的工具调用：参数是脱敏后的，结果只有摘要；id 加了轮次前缀，不会和本轮的 c1 重复
+        AssistantMessage.ToolCall call = ((AssistantMessage) prompt.get(2)).getToolCalls().getFirst();
+        assertThat(call.id()).isEqualTo("h0-c1");
+        assertThat(call.name()).isEqualTo("searchKnowledgeBase");
+        assertThat(call.arguments()).contains(query);
+        ToolResponseMessage.ToolResponse response = ((ToolResponseMessage) prompt.get(3)).getResponses().getFirst();
+        assertThat(response.id()).isEqualTo("h0-c1");
+        assertThat(response.responseData()).startsWith("（历史记录，只保留了结果摘要）");
+        // 历史回答中的引用编号去掉了
+        assertThat(prompt.get(4).getText()).isEqualTo("住宿标准见制度。");
+    }
+
+    /** 实测：模型没有检索，编了一段制度并标上引用编号。回答末尾追加引用核对，这一轮也不进入后续历史。 */
+    @Test
+    void citationsWithoutAnySearchAreFlaggedAndKeptOutOfTheHistory() {
+        User user = newUser(Role.USER);
+        long conversationId = agentConversation(user, null);
+        String path = ChatFixtures.streamPath(conversationId);
+        chatModel.script(answerWith("根据《员工费用报销管理制度》，餐饮补助实行包干制[3]。"), answerWith("好的。"));
+
+        SseStream stream = api.stream(path, user, body("报销补助"));
+
+        assertThat(stream.first("citations").data().path("mode").asString()).isEqualTo("NONE");
+        assertThat(stream.first("citations").data().path("invalidIndices").get(0).asInt()).isEqualTo(3);
+        assertThat(stream.first("done").data().path("unverifiedNumbers").size()).isZero();
+        assertThat(stream.text()).startsWith("根据《员工费用报销管理制度》")
+                .endsWith("> 引用核对：本轮没有检索知识库，回答中标注的引用编号（3）没有对应的资料，相关内容未经知识库核实，请不要采用。");
+        long messageId = stream.first("meta").data().path("messageId").asLong();
+        assertThat(jdbc.queryForObject("SELECT content FROM chat_message WHERE id = ?", String.class, messageId))
+                .isEqualTo(stream.text());
+
+        api.stream(path, user, body("那住宿呢？"));
+
+        assertThat(chatModel.lastPrompt().getInstructions()).extracting(Message::getMessageType)
+                .containsExactly(MessageType.SYSTEM, MessageType.USER);
     }
 
     @Test

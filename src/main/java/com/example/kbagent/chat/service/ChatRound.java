@@ -103,6 +103,11 @@ public abstract class ChatRound {
         return null;
     }
 
+    /** 模型输出结束后的引用核对：需要提醒用户时返回追加在回答末尾的说明，否则返回 null。 */
+    protected String citationNote(CitationResult result) {
+        return null;
+    }
+
     /**
      * 流式调用模型：文本分片转为 delta 事件，同时记录首字时间、用量和模型名。
      * 失败时写调用日志，并把异常转换为 BusinessException（上游错误归类为 UPSTREAM_*，其他保持原样）。
@@ -125,21 +130,31 @@ public abstract class ChatRound {
     }
 
     /**
-     * 模型输出结束：数字核对、解析引用、写调用日志、执行短事务 2，然后推送 citations 和 done。
-     * 有找不到出处的数字时，在回答末尾追加一段提示（同时推送一个 delta 并写入消息），客户端不认识新字段也能看到。
+     * 模型输出结束：解析引用、数字核对、引用核对、写调用日志、执行短事务 2，然后推送 citations 和 done。
+     * 核对发现问题时，在回答末尾追加提示（同时推送一个 delta 并写入消息），客户端不认识新字段也能看到。
+     * 引用在追加提示之前解析，提示里的文字不会被当成引用。
      */
     protected final Flux<ChatEvent> finish() {
         return Mono.fromCallable(() -> {
             String modelOutput = answer.toString();
+            CitationResult result = citations(modelOutput);
             NumberGrounding.Result check = checkNumbers(modelOutput);
-            String note = NumberGrounding.note(check);
-            if (note != null) {
+            String numberNote = NumberGrounding.note(check);
+            if (numberNote != null) {
                 log.warn("unverified numbers in {} answer (traceId={}, messageId={}): {}", turn.mode(), traceId,
                         turn.answerMessageId(), check.unverified());
+            }
+            String citationNote = citationNote(result);
+            if (citationNote != null) {
+                log.warn("citations without sources in {} answer (traceId={}, messageId={}): {}", turn.mode(),
+                        traceId, turn.answerMessageId(), result.invalidIndices());
+            }
+            String note = numberNote == null ? citationNote
+                    : citationNote == null ? numberNote : numberNote + citationNote;
+            if (note != null) {
                 answer.append(note);
             }
             String content = answer.toString();
-            CitationResult result = citations(content);
             ChatEvent.Usage reportedUsage = usageOf(modelOutput);
             recordLlm(modelOutput, reportedUsage, null, null);
             if (claim()) {

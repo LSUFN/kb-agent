@@ -21,6 +21,8 @@ import java.util.regex.Pattern;
  * 换算成“万”“亿”、中文数字（资料原文的“六小时”）、PDF 换行把 450 拆成“4\n50”。
  * 占比（带 % 的数字）如果等于出处中某两个数字相除的结果（按回答中的小数位数四舍五入），也算有出处：
  * 分析类回答里很常见，每次都提示会让用户习惯性忽略，真正编造的数字反而不显眼。增长率等其他推算仍会被标出。
+ * 时长换算同理：出处中以分钟为单位的数值（字段名以 Minutes 结尾，或文字“N 分钟”），回答写成“6.3 小时”
+ * “6 小时 18 分钟”时，按回答的精度换算回分钟比对。只和分钟数值比，不会因为碰巧接近某个订单数而放过编造的时长。
  */
 public final class NumberGrounding {
 
@@ -53,6 +55,14 @@ public final class NumberGrounding {
             Pattern.compile("(?m)^\\s*\\d{1,2}[.、)）]\\s*"),
             Pattern.compile("[A-Za-z_]+\\d+"));
 
+    /** 出处中以分钟为单位的数值：JSON 字段名以 Minutes 结尾，或文字“N 分钟”。 */
+    private static final Pattern MINUTES_FIELD = Pattern.compile("\"\\w*[Mm]inutes\"\\s*:\\s*(\\d+(?:\\.\\d+)?)");
+    private static final Pattern MINUTES_TEXT = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*分钟");
+    /** 回答中的时长：“6.3 小时”“6 小时 18 分钟”。 */
+    private static final Pattern HOURS = Pattern.compile(
+            "(\\d+(?:\\.\\d+)?)\\s*个?小时(?:\\s*(\\d+(?:\\.\\d+)?)\\s*分钟?)?");
+    private static final BigDecimal SIXTY = new BigDecimal("60");
+
     private static final BigDecimal HUNDRED = new BigDecimal("100");
     private static final BigDecimal TEN_THOUSAND = new BigDecimal("10000");
     /** 参与占比推算的出处数字上限，限制两两相除的计算量。 */
@@ -73,9 +83,14 @@ public final class NumberGrounding {
         }
         collect(question, known, operands);
 
+        List<BigDecimal> minutes = new ArrayList<>();
+        for (String text : evidence) {
+            collectMinutes(text, minutes);
+        }
+
         List<String> unverified = new ArrayList<>();
         NavigableSet<BigDecimal> reported = new TreeSet<>();
-        String text = withoutNonData(answer == null ? "" : answer);
+        String text = withoutConvertedDurations(withoutNonData(answer == null ? "" : answer), minutes);
         Matcher m = NUMBER.matcher(text);
         while (m.find() && unverified.size() < MAX_REPORTED) {
             BigDecimal value = parse(m.group());
@@ -116,6 +131,48 @@ public final class NumberGrounding {
             }
         }
         return false;
+    }
+
+    private static void collectMinutes(String text, List<BigDecimal> minutes) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        for (Pattern pattern : List.of(MINUTES_FIELD, MINUTES_TEXT)) {
+            Matcher m = pattern.matcher(text);
+            while (m.find()) {
+                minutes.add(new BigDecimal(m.group(1)));
+            }
+        }
+    }
+
+    /**
+     * 去掉能由出处中的分钟数换算得到的时长。容差是回答精度的一半：
+     * “6.3 小时”是 ±3 分钟，“6 小时 18 分钟”是 ±0.5 分钟，“约 6 小时”是 ±30 分钟。
+     */
+    private static String withoutConvertedDurations(String text, List<BigDecimal> minutes) {
+        if (minutes.isEmpty()) {
+            return text;
+        }
+        Matcher m = HOURS.matcher(text);
+        StringBuilder result = new StringBuilder();
+        while (m.find()) {
+            BigDecimal hours = new BigDecimal(m.group(1));
+            BigDecimal total = hours.multiply(SIXTY);
+            BigDecimal tolerance;
+            if (m.group(2) != null) {
+                BigDecimal extra = new BigDecimal(m.group(2));
+                total = total.add(extra);
+                tolerance = BigDecimal.ONE.movePointLeft(Math.max(0, extra.scale())).divide(BigDecimal.TWO);
+            } else {
+                tolerance = SIXTY.movePointLeft(Math.max(0, hours.scale())).divide(BigDecimal.TWO);
+            }
+            BigDecimal target = total;
+            boolean converted = minutes.stream()
+                    .anyMatch(v -> v.subtract(target).abs().compareTo(tolerance) <= 0);
+            m.appendReplacement(result, converted ? " " : Matcher.quoteReplacement(m.group()));
+        }
+        m.appendTail(result);
+        return result.toString();
     }
 
     /** 追加在回答末尾的提示；全部有出处时返回 null。 */
