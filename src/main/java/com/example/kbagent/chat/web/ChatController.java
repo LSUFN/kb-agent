@@ -66,9 +66,11 @@ public class ChatController {
         Flux<ServerSentEvent<Object>> heartbeat = Flux.interval(properties.heartbeatInterval())
                 .onBackpressureDrop()
                 .map(tick -> PING);
-        // 显式声明 UTF-8：SSE 规范要求按 UTF-8 解码，但不带 charset 时部分客户端（如 IntelliJ HTTP Client）会按 ISO-8859-1 显示
+        // 显式声明 UTF-8：SSE 规范要求按 UTF-8 解码，但不带 charset 时部分客户端（如 IntelliJ HTTP Client）会按 ISO-8859-1 显示。
+        // X-Accel-Buffering 让 Nginx 不缓冲这个响应（部署配置里另外也关闭了缓冲，§6.4）
         return ResponseEntity.ok()
                 .contentType(EVENT_STREAM_UTF8)
+                .header("X-Accel-Buffering", "no")
                 .body(events.publish(shared -> Flux.merge(shared, heartbeat.takeUntilOther(shared.then()))));
     }
 

@@ -78,6 +78,9 @@ spring:
 
 server:
   shutdown: graceful
+  # 部署在 Nginx 后面（M6）：信任内网代理传来的 X-Forwarded-For，登录限流按真实客户端 IP 计算。
+  # 只有直接连接方是内网地址时才采信该请求头，客户端直连时伪造不了
+  forward-headers-strategy: native
   error:
     include-stacktrace: never
     include-message: never
@@ -108,8 +111,9 @@ app:
     actor-cache-ttl: 30s
     login-rate-limit-per-minute: ${APP_LOGIN_RATE_LIMIT_PER_MINUTE:10}
   demo:
-    # 启动时创建 admin / analyst / user 三个演示账号；只在账号不存在时创建，不覆盖已有密码
-    seed-users: false
+    # 启动时创建 admin / analyst / user 三个演示账号；只在账号不存在时创建，不覆盖已有密码。
+    # local profile 和 Docker Compose 部署中开启
+    seed-users: ${APP_DEMO_SEED_USERS:false}
     password: ${DEMO_USER_PASSWORD:}
   storage:
     root: ${APP_STORAGE_ROOT:./data/storage}
@@ -134,7 +138,7 @@ app:
     model: ${AI_EMBEDDING_MODEL:text-embedding-v3}
   retrieval:
     top-k: 5
-    # 余弦相似度阈值：一个片段都达不到时直接拒答、不调用模型。按真实模型校准，见 README M3
+    # 余弦相似度阈值：一个片段都达不到时直接拒答、不调用模型。按真实模型校准，见 docs/DEVLOG.md 的 M3 一节
     min-score: ${APP_RETRIEVAL_MIN_SCORE:0.5}
     ef-search: 100
   chat:

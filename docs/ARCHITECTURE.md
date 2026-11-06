@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.10（2026-11-06）· **状态：M0–M5 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M5 的验收标准已验证（§4.8–§4.11、§9.1）。M6 起的“验收标准”和“测试用例”仍是计划，要在实现后逐项验证。
+> 版本 v0.2.11（2026-11-06）· **状态：M0–M6 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M6 的验收标准已验证（§4.8–§4.11、§8.1、§9.1）。P1 起的内容仍是计划。
+> v0.2.11 变更：M6 落地，新增 §8.1：后端和前端镜像、完整的 Docker Compose（`app` profile、健康检查、启动顺序）、Nginx（SSE 不缓冲、CSP）；README 改为面向读者的首页，各阶段的详细记录移到 `docs/DEVLOG.md`。
 > v0.2.10 变更：Agent 追问相关的制度问题时不检索、直接编内容（用户实测发现），历史中改为保留工具调用记录，并新增引用核对；数字核对接受时长换算（§4.11）。
 > v0.2.9 变更：M5 落地，新增 §9.1。包括：前端工程 `frontend/`；实现 §6.5 中的 `/admin/tasks`（DEAD 任务重新排队时复用同一行）和 `/admin/metrics/overview`（延迟只统计对话调用）；`TaskHandler` 新增 `onManualRetry` 回调。
 > v0.2.8 变更：数字核对的结果写入 `chat_message.unverified_numbers`（Flyway V3）；组装对话历史时跳过含有未核实数字的轮次（§4.11）。
@@ -479,7 +480,7 @@ chatClient.prompt()
 - 知识库中还有文档（包括正在删除的）时不能删除，返回 409。这样避免在同一个请求里级联删除大量文件。
 - 上传遇到同一知识库中内容相同的文档时，无论那个文档是什么状态（包括 FAILED），都返回 200 和已有文档。用户可以对它执行“重新处理”。
 
-**验收结果（2026-11-04）**：§7 中入库、补偿、任务恢复、事务边界、删除竞争的集成测试全部通过（见 README 的 M2 验收清单）。真实 PDF 用的是一份 54 页的英文文档（1.5MB），调用真实的通义 `text-embedding-v3`，每批 10 条：
+**验收结果（2026-11-04）**：§7 中入库、补偿、任务恢复、事务边界、删除竞争的集成测试全部通过（见 [DEVLOG](DEVLOG.md) 的 M2 验收清单）。真实 PDF 用的是一份 54 页的英文文档（1.5MB），调用真实的通义 `text-embedding-v3`，每批 10 条：
 
 - 上传接口 0.13 秒返回 202。
 - 9.3 秒后变为 READY，第一次尝试就成功，没有重试。
@@ -536,7 +537,7 @@ chatClient.prompt()
 - 消息的游标分页返回 `{items, nextBeforeId}`：`items` 按时间正序，`nextBeforeId` 为 null 表示没有更早的消息。
 - 会话绑定的知识库被删除后 `kb_id` 变为 null（`ON DELETE SET NULL`），之后在用户有权访问的全部知识库中检索。只有清空了文档的知识库才能删除（§4.9），所以不会悄悄换掉有内容的资料来源。
 
-**验收结果（2026-11-05）**：§8 的四项都已通过集成测试（见 README 的 M3 验收清单）。真实模型（qwen-plus + text-embedding-v3）的端到端检查：
+**验收结果（2026-11-05）**：§8 的四项都已通过集成测试（见 [DEVLOG](DEVLOG.md) 的 M3 验收清单）。真实模型（qwen-plus + text-embedding-v3）的端到端检查：
 - 首字时间（从请求开始算）：12 次调用中 11 次在 0.4–0.9 秒，1 次 1.7 秒。英文长回答（210–323 个 token）5.1–7.6 秒完成。
 - 领域外的问题 0.13–0.23 秒拒答，没有 Chat 调用记录。
 - 用户在第 5 个 delta 后断开，0.3 秒内消息变为 INTERRUPTED，保存了已生成的 140 个字。调用日志记录为 `CLIENT_CLOSED`，耗时 0.8 秒（完整回答需要约 6 秒），说明上游请求确实被中止了。
@@ -636,7 +637,7 @@ chatClient.prompt()
   - 复测 3/3 不再误标。
 - **仍然存在**：没有历史时直接问很短的制度问题，模型偶尔会反问具体想了解什么（3 次中 1 次），但没有编造。
 
-**验收结果（2026-11-05）**：§8 的五项都已通过（见 README 的 M4 验收清单）。
+**验收结果（2026-11-05）**：§8 的五项都已通过（见 [DEVLOG](DEVLOG.md) 的 M4 验收清单）。
 
 - **通义流式分片回放测试**：本地模拟服务器回放 S2 记录的分片（续传分片带 `"id": ""`），走真实的 OpenAiChatModel。Spring AI 2.0.2 下通过。切到 2.0.0 运行同一个测试会失败（`NoSuchElementException`，与 S2 记录的现象一致），说明它确实能拦住这个回归。
 - **真实模型端到端**（qwen-plus）：
@@ -981,12 +982,44 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | **M3 KB_QA 与会话** ✅ 2026-11-05 完成 | 检索和调试接口；KB_QA 流程；SSE 事件协议；引用解析；会话和消息状态机；`LlmCallRecorder` + 脱敏 | 引用合法性测试通过；问知识库里没有的内容时拒答且不调用 LLM；断开连接后消息为 INTERRUPTED；日志中没有原文敏感信息 |
 | **M4 Agent 与工具** ✅ 2026-11-05 完成 | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
 | **M5 前端** ✅ 2026-11-05 完成 | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
-| **M6 部署与文档** | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
+| **M6 部署与文档** ✅ 2026-11-06 完成 | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
 | P1（MVP 之后） | 离线评测（§4.5 层次 B）；GitHub Actions CI；混合检索 / Rerank；问题改写；指标看板 | 评测结果来自真实运行 |
 | P2 | 测井异常诊断模块（§10） | |
 | P3 | 只读数据库账号；MinIO；Ollama 离线方案 | |
 
 每个阶段结束时都要满足：代码可运行，本阶段的测试已实际执行并通过，README 已同步更新。之后再进入下一阶段。
+
+### 8.1 M6 实现说明
+
+部署形态：`web`（Nginx，托管前端并反向代理 `/api`）→ `backend`（Spring Boot）→ `postgres`（pgvector）、`redis`，都在 Docker Compose 的同一个网络里。只有 `web` 映射端口（默认 8088）；后端和 Actuator 不直接对外，数据库和 Redis 只绑定本机回环地址，供本地开发使用。
+
+**镜像**：
+- 后端：多阶段构建。`maven:3.9-eclipse-temurin-21` 打包后，用 `java -Djarmode=tools extract --layers --launcher` 按 Spring Boot 分层解压。运行镜像 `eclipse-temurin:21-jre`，依赖层约 180 MB、应用层约 2 MB，改代码只重建最后一层。以非 root 用户运行，带 `HEALTHCHECK`（JRE 镜像自带 curl）；时区 Asia/Shanghai；`MaxRAMPercentage=75`。
+- 前端：`node:22-alpine` 执行 `npm ci` 和 `npm run build`（含类型检查），产物放进 `nginx:1.28-alpine`。
+- 构建时的依赖下载使用 BuildKit 缓存。国内网络可以通过 `MAVEN_MIRROR`、`NPM_REGISTRY` 指定镜像源（构建参数，默认使用官方源）。
+
+**Compose**：
+- `backend`、`web` 属于 `app` profile。`.env.example` 写了 `COMPOSE_PROFILES=app`，新环境 `docker compose up` 就会启动全部服务；本地开发时执行 `docker compose up -d postgres redis`，只启动基础设施。已有的 `.env` 没有这一行，行为不变。
+- 启动顺序靠健康检查保证：postgres、redis 健康 → backend 健康（`/actuator/health`）→ web。
+- 后端的其他配置仍从 `.env` 读取（`env_file`），与本地开发共用一份；连接地址、端口、密码在 `environment` 中按容器网络覆盖。数据库密码等用插值写入，保证与数据库容器初始化时使用的值一致。
+- `JWT_SECRET`、`DEMO_USER_PASSWORD`、`AI_API_KEY` 用 `${VAR:?提示}` 必填。Compose 在启动任何服务之前都会检查（即使只启动数据库也会检查），缺少时直接给出中文提示，而不是构建几分钟后让后端反复重启。
+- 与 §8 原计划的差别：原定“只填 Key”就能运行，实际还要填写 JWT 签名密钥和演示账号密码。示例配置里不放默认值，避免有人直接用默认密钥部署到公网。
+
+**Nginx**（`frontend/nginx.conf`）：
+- 流式接口 `^/api/v1/conversations/\d+/messages/stream$` 关闭缓冲和压缩，读超时 300 秒（与后端的 5 分钟一致，§6.4）。后端同时在响应头中带 `X-Accel-Buffering: no`。
+- `proxy_set_header` 写在 server 级别：location 中一旦再写，就不会继承 server 级别的任何一条（Host、X-Forwarded-For 会丢失）。`add_header` 同理，所以各 location 用 `expires` 控制缓存，不写 `add_header`。
+- 安全响应头：CSP（`script-src 'self'`，不允许内联脚本和外部来源；Element Plus 需要 `style-src 'unsafe-inline'`）、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`；不暴露版本号。
+- 上传上限 21 MB；带哈希的静态资源缓存一年，`index.html` 不缓存；前端路由回退到 `index.html`。
+
+**后端调整**：
+- `server.forward-headers-strategy: native`：信任内网代理的 `X-Forwarded-For`，登录限流按真实客户端 IP 计算。只有直接连接方是内网地址时才采信，客户端直连时伪造不了。
+- 演示账号由 `APP_DEMO_SEED_USERS` 控制，local profile 和 Compose 部署中开启。
+
+**验证（2026-11-06）**：在本机用隔离的 Compose 项目（单独的项目名、端口和全新数据卷）模拟新环境，详见 [DEVLOG](DEVLOG.md) 的 M6 一节。
+- 四个服务按依赖顺序变为 healthy。
+- 流式输出经过 Nginx 逐段推送（0.54 秒收到第一段文字，43 段在 5.4 秒内陆续到达）。
+- 限流记录的是 Docker 网关地址，而不是 Nginx 容器的地址。
+- 用 Playwright 驱动本机 Edge 走完整条演示流程（真实模型），CSP 下页面没有控制台错误。
 
 ---
 

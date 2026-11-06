@@ -1,6 +1,7 @@
-# M0：仅包含基础设施（PostgreSQL + pgvector、Redis）。
-# 后端与前端容器在 M6 加入。
-# 用法：cp .env.example .env（填写密码）→ docker compose up -d
+# 用法：
+#   完整运行（M6）：cp .env.example .env，填写其中标注“必填”的项 → docker compose up -d --build → 打开 http://localhost:8088
+#   本地开发（后端在 IDE 中运行）：docker compose up -d postgres redis
+# backend、web 属于 app profile；.env.example 里的 COMPOSE_PROFILES=app 让 docker compose up 一并启动它们。
 name: kb-agent
 
 services:
@@ -12,7 +13,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-kbagent}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
     ports:
-      # 只绑定本机回环地址，不对局域网暴露
+      # 只绑定本机回环地址，不对局域网暴露；本地开发时 IDE 中的后端通过它连接
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -38,6 +39,55 @@ services:
       timeout: 3s
       retries: 20
 
+  backend:
+    profiles: ["app"]
+    build:
+      context: .
+      args:
+        MAVEN_MIRROR: ${MAVEN_MIRROR:-}
+    image: kb-agent-backend
+    restart: unless-stopped
+    # 其余配置（模型、限流、检索阈值等）从 .env 读取，与本地开发共用一份
+    env_file: .env
+    environment:
+      # 容器之间按服务名访问，端口是容器内的端口（.env 里的端口是映射到本机的端口）
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      APP_STORAGE_ROOT: /app/data/storage
+      # 启动时创建演示账号 admin / analyst / user（只在账号不存在时创建）
+      APP_DEMO_SEED_USERS: "true"
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET（至少 32 字节，可用 openssl rand -base64 48 生成）}
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?请在 .env 中设置 DEMO_USER_PASSWORD（演示账号密码，至少 8 位）}
+      AI_API_KEY: ${AI_API_KEY:?请在 .env 中填写 AI_API_KEY（通义 DashScope 的 API Key）}
+    volumes:
+      # 上传的 PDF
+      - appdata:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 不映射端口：只由 web 容器的 Nginx 访问
+
+  web:
+    profiles: ["app"]
+    build:
+      context: ./frontend
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    image: kb-agent-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8088}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
+  appdata:
