@@ -1,6 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台 — 架构方案
 
-> 版本 v0.2.11（2026-11-06）· **状态：M0–M6 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M6 的验收标准已验证（§4.8–§4.11、§8.1、§9.1）。P1 起的内容仍是计划。
+> 版本 v0.2.12（2026-11-06）· **状态：M0–M6 已完成。** `mvn verify` 已在本机通过，Spike S1–S5 已实测并回填 §2.2，M1–M6 的验收标准已验证（§4.8–§4.11、§8.1、§9.1）。P1 起的内容仍是计划。
+> v0.2.12 变更：新增 GitHub Actions CI（§8 的 P1 项之一）。
 > v0.2.11 变更：M6 落地，新增 §8.1：后端和前端镜像、完整的 Docker Compose（`app` profile、健康检查、启动顺序）、Nginx（SSE 不缓冲、CSP）；README 改为面向读者的首页，各阶段的详细记录移到 `docs/DEVLOG.md`。
 > v0.2.10 变更：Agent 追问相关的制度问题时不检索、直接编内容（用户实测发现），历史中改为保留工具调用记录，并新增引用核对；数字核对接受时长换算（§4.11）。
 > v0.2.9 变更：M5 落地，新增 §9.1。包括：前端工程 `frontend/`；实现 §6.5 中的 `/admin/tasks`（DEAD 任务重新排队时复用同一行）和 `/admin/metrics/overview`（延迟只统计对话调用）；`TaskHandler` 新增 `onManualRetry` 回调。
@@ -983,7 +984,7 @@ event: error      data: {"code":"UPSTREAM_TIMEOUT","message":"模型服务超时
 | **M4 Agent 与工具** ✅ 2026-11-05 完成 | 4 个工具；`GuardedToolCallback`；`ToolPolicy`；`CitationRegistry`；工具事件推送；报告生成和下载；工具审计 | 权限矩阵的参数化测试和越权集成测试通过；报告数字与 SQL 一致；超出调用预算时安全收尾；SSE 中能看到工具调用的完整过程；通义流式分片回放测试通过（§7） |
 | **M5 前端** ✅ 2026-11-05 完成 | 见 §9 | 在浏览器里不借助 Postman 完成整条演示流程：上传 → 问答（流式、引用）→ Agent 分析（工具过程可视化）→ 下载报告 → 管理员查看日志 |
 | **M6 部署与文档** ✅ 2026-11-06 完成 | 后端 Dockerfile（多阶段构建，`eclipse-temurin:21-jre`）；前端 Nginx 镜像；完整的 Compose（含健康检查和依赖顺序）；README（架构图、启动步骤、演示脚本、设计取舍、已知限制） | 在一台新机器上执行 `cp .env.example .env`、填入 Key、`docker compose up`，就能完整运行 |
-| P1（MVP 之后） | 离线评测（§4.5 层次 B）；GitHub Actions CI；混合检索 / Rerank；问题改写；指标看板 | 评测结果来自真实运行 |
+| P1（MVP 之后） | 离线评测（§4.5 层次 B）；GitHub Actions CI（✅ 2026-11-06，`.github/workflows/ci.yml`：后端全部测试、前端测试与打包、全新 Linux 机器上的 Compose 部署检查）；混合检索 / Rerank；问题改写；指标看板 | 评测结果来自真实运行 |
 | P2 | 测井异常诊断模块（§10） | |
 | P3 | 只读数据库账号；MinIO；Ollama 离线方案 | |
 

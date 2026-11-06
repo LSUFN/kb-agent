@@ -1,5 +1,7 @@
 # 企业智能知识库与业务分析 Agent 平台
 
+[![CI](https://github.com/LSUFN/kb-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/LSUFN/kb-agent/actions/workflows/ci.yml)
+
 企业内部的知识库问答（RAG）和业务数据分析 Agent：
 - 员工用自然语言查询公司制度，回答带可以核对的引用。
 - 业务分析员让 Agent 调用统计工具，查询订单和异常事件、生成报告。每次工具调用都在服务端鉴权和审计。
@@ -176,6 +178,8 @@ cd frontend && npm test    # 前端单元测试（Vitest）
 cd frontend && npm run build   # 前端类型检查 + 打包
 ```
 
+每次推送到 main、每个 Pull Request，[GitHub Actions](.github/workflows/ci.yml) 都会自动运行以上全部测试。另外，它还会在一台全新的 Linux 机器上，按“快速开始”的步骤执行 `docker compose up`，然后检查经 Nginx 的页面、安全响应头、接口和演示账号登录。
+
 ## 设计取舍
 
 | 选择 | 原因 | 代价 |
@@ -197,12 +201,13 @@ cd frontend && npm run build   # 前端类型检查 + 打包
 - 模型有时在调用工具之前，先输出自己的分析或调用计划。实测在提示词中禁止这样做，反而让模型更少调用工具，所以没有改。
 - 没有历史时直接问很短的制度问题（例如“报销补助”），模型偶尔会反问具体想了解什么。
 - 按单实例部署设计：停止生成依赖断开连接，没有单独的取消接口。
-- 还没有 CI 流水线；前端 Element Plus 是全量引入，主包较大。
+- 前端 Element Plus 是全量引入，主包较大。
 
 ## 目录结构
 
 ```
 .
+├── .github/workflows/ci.yml    CI：后端全部测试、前端测试与打包、Compose 部署检查
 ├── Dockerfile                  后端镜像（多阶段构建，按 Spring Boot 分层）
 ├── docker-compose.yml          PostgreSQL + Redis；app profile 再加上后端和前端
 ├── .env.example                环境变量模板
